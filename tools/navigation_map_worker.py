@@ -1,0 +1,162 @@
+"""Perception-only fixed-height ray mapping, connected to the owner by a pipe."""
+
+import argparse
+import json
+import math
+from pathlib import Path
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+import numpy as np
+import rclpy
+from rclpy.time import Time
+from tools.forward_clearance import ForwardClearance, stamp_ns, transform_parts
+from lidar_tools.cloud import xyz_array
+from lidar_tools.clearance import health_issue
+from navigation.mapping import RayMap
+
+
+class MapWorker(ForwardClearance):
+    def __init__(self, args):
+        self.map = RayMap()
+        self.good = None
+        self.map_error = "Waiting for cloud and transforms"
+        self.last_emit = 0.0
+        super().__init__(args)
+
+    def on_clock(self, msg):
+        reset = self.clock_ns is not None and stamp_ns(msg.clock) < self.clock_ns
+        super().on_clock(msg)
+        if reset:
+            self.map = RayMap()
+            self.good = None
+            self.map_error = "Simulation clock reset; map cleared"
+
+    def on_cloud(self, msg):
+        super().on_cloud(msg)
+        if self.pending is None:
+            self.map_error = self.reason
+
+    def process_pending(self):
+        if self.pending is None:
+            return
+        msg, arrived = self.pending
+        now = time.monotonic()
+        problem = health_issue(
+            now_wall=now,
+            arrival_wall=arrived,
+            clock_progress_wall=self.clock_progress_wall,
+            clock_ns=self.clock_ns,
+            cloud_ns=stamp_ns(msg.header.stamp),
+        )
+        if problem:
+            self.map_error = problem
+            if now - arrived > 0.3:
+                self.pending = None
+            return
+        try:
+            capture = Time.from_msg(msg.header.stamp)
+            body = self.buffer.lookup_transform("chassis", msg.header.frame_id, capture)
+            world = self.buffer.lookup_transform("world", msg.header.frame_id, capture)
+        except Exception:
+            if now - arrived > 0.3:
+                self.pending = None
+                self.map_error = "Capture-time transforms missing"
+            return
+        try:
+            br, bt = transform_parts(body)
+            wr, wt = transform_parts(world)
+            body_r = wr @ br.T
+            body_t = wt - body_r @ bt
+            if not self.map.inside(self.map.cell(body_t[:2])):
+                raise ValueError("Vehicle outside the 12 m map")
+            # Reject a changed floor/flight-height relationship rather than map
+            # an unintended altitude band as navigable space.
+            if abs(body_t[2] - (self.args.floor_z + 1.0)) > 0.2:
+                raise ValueError("Mapping expects the existing 1 m hover")
+            hits = self.map.update(
+                xyz_array(msg), wr, wt, body_t[:2], body_t[2], self.args.near_range
+            )
+            self.good = dict(
+                stamp_ns=stamp_ns(msg.header.stamp),
+                arrival_wall=arrived,
+                pose=[
+                    float(body_t[0]),
+                    float(body_t[1]),
+                    math.atan2(body_r[1, 0], body_r[0, 0]),
+                    float(body_t[2]),
+                ],
+                hits=hits,
+            )
+            self.map_error = None
+        except (ValueError, TypeError, BufferError) as exc:
+            self.map_error = str(exc)
+        self.pending = None
+
+    def publish_status(self):
+        now = time.monotonic()
+        if now - self.last_emit < 0.5:
+            return
+        self.last_emit = now
+        good = self.good
+        problem = self.map_error
+        if good is not None:
+            problem = problem or health_issue(
+                now_wall=now,
+                arrival_wall=good["arrival_wall"],
+                clock_progress_wall=self.clock_progress_wall,
+                clock_ns=self.clock_ns,
+                cloud_ns=good["stamp_ns"],
+            )
+        report = dict(
+            session=self.args.stream_session,
+            generated_monotonic_s=now,
+            frame="world",
+            fresh=good is not None and problem is None,
+            reason=problem or "Live ray map",
+            stamp_ns=good["stamp_ns"] if good else None,
+            scans=self.map.scans,
+            cloud_age_s=now - good["arrival_wall"] if good else None,
+            clock_age_s=(
+                now - self.clock_progress_wall if self.clock_progress_wall is not None else None
+            ),
+            resolution=self.map.resolution,
+            origin=self.map.origin.tolist(),
+            size=self.map.grid.shape[0],
+            grid="".join(np.array(["?", ".", "#", "b"])[self.map.grid.ravel()].tolist()),
+            pose=good["pose"] if good else None,
+            hits=np.round(good["hits"], 4).tolist() if good else [],
+            near_range_m=self.args.near_range,
+        )
+        print(json.dumps(report, allow_nan=False, separators=(",", ":")), flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--stream-session", required=True)
+    parser.add_argument("--floor-z", type=float, default=-0.76965)
+    parser.add_argument("--near-range", type=float, default=0.5)
+    args = parser.parse_args()
+    if not math.isfinite(args.floor_z) or not 0.1 <= args.near_range <= 1.0:
+        parser.error("Invalid floor/near range")
+    args.topic = "/lidar/points"
+    args.sensor_frame = "point_cloud"
+    args.output = None
+    rclpy.init()
+    if rclpy.get_rmw_implementation_identifier() != "rmw_zenoh_cpp":
+        raise RuntimeError("Map worker requires Zenoh")
+    node = MapWorker(args)
+    try:
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.01)
+            node.process_pending()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

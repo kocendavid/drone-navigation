@@ -1,0 +1,71 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: World grid (metres)
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Color: 80; 80; 80
+      Alpha: 0.4
+    - Class: rviz_default_plugins/Axes
+      Name: Lidar axes
+      Enabled: true
+      Reference Frame: <Fixed Frame>
+      Length: 0.5
+      Radius: 0.02
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Raw LiDAR
+      Enabled: true
+      Topic:
+        Value: /lidar/points
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+      Position Transformer: XYZ
+      Color Transformer: FlatColor
+      Color: 70; 210; 255
+      Style: Points
+      Size (Pixels): 3
+      Size (m): 0.02
+      Decay Time: 0
+      Alpha: 1
+    - Class: rviz_default_plugins/TF
+      Name: Available ROS frames
+      Enabled: true
+      Show Axes: true
+      Show Arrows: true
+      Show Names: true
+      Frame Timeout: 2
+  Enabled: true
+  Global Options:
+    Fixed Frame: world
+    Background Color: 25; 28; 35
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 10
+      Pitch: 0.6
+      Yaw: 0.7
+      Target Frame: <Fixed Frame>
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+  Value: true
+Window Geometry:
+  Width: 1100
+  Height: 750

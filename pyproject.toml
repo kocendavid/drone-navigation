@@ -1,0 +1,14 @@
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+force-exclude = '/(\.vendor|\.tools|logs|results|shortcut-backups)/'
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".vendor", ".tools", "logs", "results", "shortcut-backups"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+# Isaac initialization and standalone script path setup precede selected imports.
+ignore = ["E402"]

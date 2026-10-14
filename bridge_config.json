@@ -1,0 +1,62 @@
+{
+  "body_prim_path": "/World/quadcopter/chassis",
+  "vehicle_root_prim_path": "/World/quadcopter",
+  "physics_scene_path": "/PhysicsScene",
+  "px4_host": "auto",
+  "wsl_distribution": "Ubuntu",
+  "px4_simulator_port": 14560,
+  "px4_system_id": 1,
+  "physics_hz": 250,
+  "actuator_timeout_s": 0.5,
+  "body_flu_quaternion_wxyz": [1, 0, 0, 0],
+  "vehicle_mass_kg": null,
+  "omega_max_rad_s": 900,
+  "hover_command": 0.5,
+  "k_f": null,
+  "k_m": null,
+  "yaw_moment_arm_m": 0.05,
+  "motor_time_constant_up_s": 0.0125,
+  "motor_time_constant_down_s": 0.025,
+  "gps_hz": 10,
+  "latitude_deg": 47.397742,
+  "longitude_deg": 8.545594,
+  "altitude_m": 488,
+  "magnetic_field_enu_gauss": [0.008, 0.216, -0.433],
+  "sensor_noise_seed": 42,
+  "sensor_noise_std": {
+    "accel_m_s2": 0.005,
+    "gyro_rad_s": 0.002,
+    "mag_gauss": 0.00001,
+    "pressure_hpa": 0.001
+  },
+  "rotors": [
+    {
+      "name": "FR",
+      "channel": 0,
+      "prim_path": "/World/quadcopter/rotor3",
+      "position_flu_m": [0.10253, -0.10253, 0],
+      "yaw_torque_sign": -1
+    },
+    {
+      "name": "RL",
+      "channel": 1,
+      "prim_path": "/World/quadcopter/rotor1",
+      "position_flu_m": [-0.10253, 0.10253, 0],
+      "yaw_torque_sign": -1
+    },
+    {
+      "name": "FL",
+      "channel": 2,
+      "prim_path": "/World/quadcopter/rotor0",
+      "position_flu_m": [0.10253, 0.10253, 0],
+      "yaw_torque_sign": 1
+    },
+    {
+      "name": "RR",
+      "channel": 3,
+      "prim_path": "/World/quadcopter/rotor2",
+      "position_flu_m": [-0.10253, -0.10253, 0],
+      "yaw_torque_sign": 1
+    }
+  ]
+}

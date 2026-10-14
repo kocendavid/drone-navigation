@@ -1,0 +1,13 @@
+{
+  "cruise_m_s": 0.5,
+  "slow_distance_m": 1.0,
+  "stop_distance_m": 0.65,
+  "minimum_approach_m_s": 0.08,
+  "acceleration_m_s2": 0.25,
+  "turn_speed_m_s": 0.15,
+  "target_lead_m": 0.28,
+  "body_radius_m": 0.3,
+  "obstacle_margin_m": 0.8,
+  "near_range_m": 0.5,
+  "exploration_max_goals": 20
+}

@@ -1,0 +1,114 @@
+HISTORICAL EXPERIMENT NOTES
+Dated results and troubleshooting are preserved below. For the current setup,
+read README.md and TEACHER_GUIDE.txt in the project root.
+
+Forward clearance experiment: observe first, no flight commands
+==============================================================
+
+Start (ROS 2 Jazzy terminal, Zenoh/domain 0)
+------------------------------------------
+Keep Isaac playing and the drone stationary. Keep one measured mounting TF
+publisher running in its own ROS 2 Jazzy terminal:
+
+C:\Users\finel\Documents\ChatGPT\issaac\tools\lidar_mount_tf.cmd
+
+In another ROS 2 Jazzy terminal:
+
+C:\Users\finel\Documents\ChatGPT\issaac\tools\forward_clearance.cmd
+
+Ctrl+C in that terminal stops the clearance node. Ctrl+C in the TF terminal
+stops the mount publisher. Neither node arms, switches modes, publishes
+trajectories or controls motors. No flight process needs restarting.
+Only one clearance node should run at a time.
+
+View (existing RViz window)
+--------------------------
+File > Open Config, then select:
+C:\Users\finel\Documents\ChatGPT\issaac\config\lidar_clearance.rviz
+
+Or start a new viewer if none is open:
+rviz2 -d C:\Users\finel\Documents\ChatGPT\issaac\config\lidar_clearance.rviz --ros-args -p use_sim_time:=true
+
+Faint cyan points: raw room returns.
+Orange points: range-valid forward surfaces after floor filtering and
+5 cm voxel downsampling.
+Transparent box: the 2 m test zone in front of chassis.
+Text/box: green CLEAR, red HOLD, grey UNKNOWN.
+The preset uses world as Fixed Frame and looks towards the chassis.
+RViz markers and processed-point display still require operator visual QA.
+
+What the node measures
+----------------------
+Chassis FLU axes: +X forward, +Y left, +Z up. The first corridor is
+X=0.2..15 m, Y=-0.5..0.5 m, Z=-0.3..0.5 m relative to chassis.
+Range filtering occurs in sensor coordinates at 1..30 m. Sensor near range
+is 1 m; missing returns inside that blind region never establish clearance.
+Transforms into chassis and world use each cloud's acquisition timestamp.
+Missing transforms get at most 0.3 wall seconds to arrive.
+
+Five valid stationary scans calibrate a broad horizontal floor in the lower
+half of world-coordinate returns. The fit requires at least 15% point support,
+at least 1 m span along both horizontal axes, slope below 0.5 degrees,
+95th-percentile residual below 1.5 cm, and floor heights stable within 2 cm.
+Returns less than 12 cm above that estimated floor are excluded. This is a
+flat test-room wall/box experiment; low objects in the excluded strip and
+unobserved geometry are not represented by this baseline.
+Use --floor-z VALUE only for an independently measured world floor height.
+Do not assume the room floor lies at world Z=0.
+
+CLEAR = closest observed forward surface is farther than 2 m.
+HOLD = closest observed forward surface is at or inside 2 m.
+UNKNOWN = no forward returns, malformed input, wrong frame, repeated/zero/
+backwards stamps, missing TF, clock disagreement, no advancing clock or stale
+cloud. Wall-time watchdog becomes UNKNOWN after 1 s even if /clock is paused.
+CLEAR describes observed surfaces; it does not certify a free flight volume.
+Voxelization retains the closest original sample per cell and the decision
+uses minimum X before voxelization. Downsampling cannot erase a HOLD point.
+
+ROS outputs
+-----------
+/navigation/forward_clearance   std_msgs/String (JSON, approximately 5 Hz)
+/navigation/forward_points      sensor_msgs/PointCloud2 (chassis frame)
+/navigation/clearance_markers   visualization_msgs/MarkerArray
+
+Latest JSON snapshot: logs/forward_clearance.json. Check state, reason,
+forward_distance_m, floor_calibration, counts and state_history.
+This saved snapshot is historical evidence, not a heartbeat or flight input.
+The script's --duration N runs a bounded check for N wall seconds.
+
+Verified evidence, 2026-10-12
+-----------------------------
+A 15-second live run estimated floor Z=-0.76957 m, measured the closest
+observed forward surface at about 8.48 m, and produced CLEAR.
+143 clouds arrived, 139 processed after four calibration-only scans;
+TF timeouts=0 and decoding errors=0. One final scan contained 124,590 input
+points, 47,113 floor/low returns excluded, 1,072 corridor points, 140 voxels.
+Report: logs/forward_clearance_baseline.json.
+This bounded verification process has stopped; start the command above for
+an ongoing experiment. The operator's TF publisher remains running.
+
+19 tests passed: PointCloud2 layout/invalid data, real isolated ROS delivery,
+late/missing TF, rotated sensor, floor/ceiling/side/rear filtering, exact hold
+boundary, minimum distance retained across a voxel, empty input, floor below
+world origin, rejecting walls/slopes or insufficient evidence as floor,
+clock reset and stale data.
+Run them from a ROS 2 Jazzy terminal:
+C:\Users\finel\Documents\ChatGPT\issaac\tools\check_lidar.cmd
+
+Next operator experiment
+------------------------
+1. Start the clearance node and view its preset. Confirm CLEAR near 8.48 m
+   and that orange points belong to the forward room wall.
+2. Pause Isaac for scene editing. The status should become UNKNOWN after
+   about one wall second. This tests the paused-simulation watchdog.
+3. In Isaac Script Editor, obtain placement values for a 3 m test box:
+   import runpy; runpy.run_path("C:/Users/finel/Documents/ChatGPT/issaac/tools/plan_obstacle.py")
+4. Create a visible Cube directly beneath /World, name TestObstacle,
+   Geometry Size=1, Scale=(0.2,2,2), and copy printed Translate/Rotate values.
+   Add a static Collider; leave Rigid Body absent. Resume when ready.
+5. Confirm orange points appear on its near face and CLEAR reads about 3 m.
+   The physical 2 m crossing has not yet been verified. We will calculate
+   a 1.5 m placement next, keeping the drone stationary for that check.
+
+Flat-floor calibration, corridor dimensions and 2 m threshold are experiment
+settings. No learned model or PX4 connection is enabled by this increment.

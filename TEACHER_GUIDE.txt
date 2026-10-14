@@ -1,0 +1,361 @@
+DRONE NAVIGATION LAB: TEACHER AND MAINTAINER GUIDE
+================================================
+Updated: 2026-10-14, Europe/Prague
+Project: C:\Users\finel\Documents\ChatGPT\issaac
+
+1. WHAT THE STUDENT IS BUILDING
+-------------------------------
+The experiment asks: can a simulated quadcopter use its LiDAR to discover a
+room, choose somewhere useful to inspect, and physically fly there with PX4?
+
+The system has two nested feedback loops:
+
+Navigation loop:
+  Isaac LiDAR + capture-time TF
+    -> point cloud -> world ray map -> frontier choice -> A* route
+    -> position reference -> PX4 -> Isaac movement -> next LiDAR view
+
+Flight loop:
+  Isaac IMU/GPS/barometer/magnetometer -> MAVLink simulator bridge -> PX4 EKF
+    -> position/attitude/rate control -> motor commands -> bridge rotor forces
+    -> Isaac physics -> next simulated sensor measurement
+
+The map, planner and explorer choose WHERE to go. PX4 decides how to move the
+motors. Isaac computes the physical response. The browser displays results
+and accepts the operator's intent. ROS is the message transport between parts.
+
+This is a deterministic geometric baseline, not a trained neural network.
+Localization currently uses Isaac's known world pose. This is mapping with
+known localization, not SLAM: the drone is not estimating its world pose from
+LiDAR yet. A maze tests occlusion and decision-making without changing that.
+
+2. ESSENTIAL FILES, IN A USEFUL READING ORDER
+-------------------------------------------
+The following filenames are relative to the project directory above.
+
+config/navigation_settings.json
+  The experiment's launch-time parameters: reference speed, distance bands,
+  obstacle margin, sensor near range, target lead and exploration goal limit.
+  Changing this file does not reconfigure an already running controller.
+  Changing near_range_m also requires applying the sensor script in Isaac.
+
+navigation/settings.py
+  Loads and validates the settings. Rejects a stop boundary too close to the
+  sensor blind range, inconsistent margins and unsupported speed settings.
+
+navigation/mapping.py
+  RayMap converts scans into UNKNOWN, FREE, OCCUPIED and START_AREA cells.
+  Valid rays clear space before their measured endpoint; endpoints mark walls.
+  Space behind walls stays unknown. geometry() computes body clearance and
+  the preferred obstacle margin. No route is allowed to assume unknown free.
+  Read update() and geometry() together to see how perception becomes planning.
+
+navigation/exploration.py
+  frontiers(): free cells touching an unknown cell.
+  visible_unknown(): a sparse-ray estimate of information available from a view.
+  choose_frontier(): ranks viewpoints, checks routes and chooses a useful goal.
+  ExplorationSession: start, travel, arrival, scan, pause, finish and cancellation.
+  It chooses a viewpoint inside known traversable space, standing back from
+  the unknown boundary. It does not command the drone to fly blindly into gray.
+
+navigation/planning.py
+  plan() finds an A* route through the preferred-clearance mask. Diagonal
+  corner cutting is rejected; line-of-sight shortcuts are checked again.
+  A nearby-wall starting hover can escape by increasing obstacle clearance.
+  Selection can fail even with unknown cells left: they may be unreachable,
+  excluded by clearance, already visited, or missed by bounded candidate search.
+
+navigation/motion.py
+  RouteFollower turns the route into slowly advancing position targets.
+  Distance bands, acceleration, bend speed, final braking and target-lead
+  limits are applied here. Actual tracking error can pause movement.
+  FrameAlignment converts between world XY and PX4 local North/East positions.
+  The installed bridge uses an ENU/NED axis swap; heading bias is NOT a
+  position-axis rotation. This distinction matters over metre-scale routes.
+
+ros2_navigate.py
+  The current experiment coordinator and sole PX4 setpoint publisher.
+  It receives PX4 position/status/IMU periods, owns the map feed and dashboard,
+  runs planning in a background thread, sends the 10 Hz Offboard heartbeat,
+  holds altitude/yaw, and advances the exploration session.
+  It never arms, takes off or selects a PX4 flight mode.
+
+navigation/feed.py + tools/navigation_map_worker.py
+  The worker subscribes to Isaac's Zenoh cloud/clock/TF and builds the map.
+  The parent receives bounded JSON snapshots over its owned process pipe.
+  The parent uses Fast DDS for PX4. Same ROS domain does not connect different
+  middleware implementations; the local pipe is the intentional connection.
+  Stale data, lost worker output or mismatched frames remove navigation readiness.
+  Do not launch the worker manually: the navigator owns its lifetime.
+
+navigation/dashboard.py + config/navigation.html
+  A localhost server and browser canvas, respectively. The canvas draws the
+  map, pose, route, frontier boundary and selected goal. Operator commands are
+  queued for ros2_navigate.py; the web server does not publish PX4 commands.
+  Observer mode rejects flight commands. The browser is not the flight clock:
+  closing its tab does not stop an active navigator or exploration session.
+
+ros2_hover.py + ros2_step.py
+  Shared foundations: hover messages, position freshness/reset guard and the
+  delivered-IMU simulation pacer. Their standalone hover/one-step programs are
+  earlier lessons. Do not run them alongside the current navigator as a second
+  flight-target publisher. Importing their helpers does not run those programs.
+
+load_bridge.py + bridge_loader.py
+  Operator-run Isaac entry point and source loader. Loads a fresh bridge from
+  disk while Isaac is stopped, replacing a previous bridge instance.
+
+bridge_config.json + px4_isaac/bridge.py
+  Vehicle/sensor/physics configuration and Isaac callbacks. The bridge applies
+  motor forces to the dynamic chassis and samples the actual physical state.
+  It does not teleport the drone along the navigation route.
+
+px4_isaac/model.py + px4_isaac/transport.py
+  Rotor dynamics and sensor conversions; MAVLink UDP transport, respectively.
+  Rotor coefficients are preliminary. Transport freshness and disarm cut thrust.
+
+start-isaac-px4.cmd + px4/start-isaac-sitl.sh + px4/simulator-udp.sh
+  Windows-to-WSL launcher and external-simulator setup. Use PX4 - Isaac SITL.
+  The SIH launcher runs separate internal physics and is the wrong simulator
+  for this experiment. PX4 must be linked to the physical Isaac vehicle.
+
+External installed resources (not additional project scripts):
+  Isaac installation used: X:\isaacsim\6.1.0
+  Current scene previously loaded: C:\Users\finel\Desktop\scene.usd
+    Unsaved scene edits can differ from this file; save a separate maze scene.
+  Native ROS/Pixi environment: C:\IsaacSim-ros_workspaces\jazzy_ws\pixi.toml
+  PX4 ROS message overlay: C:\px4-tools\ros_ws\install\setup.bat
+  Fast DDS profile: C:\px4-tools\fastdds.xml
+  XRCE executable: C:\px4-tools\agent-v2.4.3\bin\MicroXRCEAgent.exe
+  PX4 WSL source: /home/finel/PX4-Autopilot
+  PX4 binary: /home/finel/PX4-Autopilot/build/px4_sitl_default/bin/px4
+  Generated startup: /home/finel/.local/share/px4-isaac/rcS-isaac
+  requirements.txt describes bridge Python dependencies; this lab uses the
+  existing Isaac and Pixi runtimes instead of installing a new Python stack.
+
+3. WHAT THE TERMINALS DO
+------------------------
+KEEP RUNNING DURING A FLIGHT
+
+PX4 - Isaac SITL
+  WSL flight controller and estimator. The pxh> prompt accepts commander and
+  status commands. This is not a Windows prompt. Keep one PX4 instance.
+
+PX4 - XRCE DDS Agent
+  Bridges PX4's lightweight DDS client to the Windows ROS/Fast DDS network.
+  Current launch: MicroXRCEAgent udp4 -p 8888. The agent version is 2.4.3.
+  One agent is enough; it serves the position/status and target/heartbeat link.
+
+ROS 2 Jazzy - Zenoh Router
+  ROS middleware router serving the Isaac sensor/TF network.
+  Current process: ros2 run rmw_zenoh_cpp rmw_zenohd, domain 0.
+
+LiDAR mount TF terminal
+  tools/lidar_mount_tf.cmd publishes chassis -> point_cloud mounting geometry.
+  Current offset: (0,0,0.0591487379025617) m with aligned axes.
+  Re-measure if the sensor is moved. A frame_id string alone is not a transform.
+
+ROS - Isaac Goal Navigator
+  tools/ros2_navigate.cmd runs ros2_navigate.py. It owns mapping and the local
+  web server, and is the one program publishing PX4 targets while in Offboard.
+  Keep it running. Its map-worker child is automatic and needs no extra window.
+
+Isaac also stays running and playing. The bridge runs inside Isaac, not in an
+extra terminal. The LiDAR, /clock and world/body TF graphs run inside the scene.
+
+OPTIONAL VIEWERS AND SHORT-LIVED DIAGNOSTICS
+
+RViz: sensor/frame viewer. Current presets are config/lidar_raw.rviz,
+  config/lidar_world.rviz and config/lidar_clearance.rviz. The new occupancy map
+  and planned path are currently local JSON/browser data, not ROS map/path
+  topics. RViz can remain a useful point-cloud viewer; closing it stops no flight.
+Browser http://127.0.0.1:8787/: display and operator controls; not a heartbeat.
+tools/px4_state_probe.cmd: bounded read-only PX4 ROS delivery/state check.
+tools/lidar_probe.py: bounded cloud/time/frame inspection; see docs/history/LIDAR_SETUP.txt.
+tools/forward_clearance.cmd: earlier recommendation-only clearance experiment.
+tools/ros2_step.cmd and tools/ros2_hover.cmd: earlier flight publishers; stop
+  before launching the navigator. Native PX4 Hold is the handover mode.
+
+4. FRAMES, CLOCKS AND DATA
+--------------------------
+Scene metres, Z up. World/map XY use ENU (East, North, Up).
+Chassis/sensor convention is FLU (Forward, Left, Up).
+PX4 local position uses NED (North, East, Down); target z=-1 means 1 m above
+PX4's local origin. World floor is approximately z=-0.76965 in this scene.
+Changing the floor/world origin requires reviewing --floor-z and bridge setup.
+
+Isaac Zenoh/domain 0 provides /lidar/points (PointCloud2), /clock and /tf.
+The mapper obtains capture-time world <- sensor and chassis <- sensor TF.
+PX4 Fast DDS/domain 0 provides versioned /fmu/out position/status/IMU topics.
+Commands are /fmu/in/offboard_control_mode and /fmu/in/trajectory_setpoint.
+Version suffixes depend on installed px4_msgs; the code derives them.
+
+The heartbeat uses steady computer time at 10 Hz. Route progress uses delivered
+simulated IMU integration periods. Slow Isaac physics therefore makes a flight
+take longer in real time rather than compressing its target trajectory.
+Commands use timestamp=0 because this installed PX4 decoder assigns receipt
+time. Sensor timestamps are XRCE-adjusted and must not be copied into commands.
+That receipt policy is specific to the installed decoder, not a universal API rule.
+
+5. CURRENT SPEED AND GEOMETRY SETTINGS
+--------------------------------------
+Requested and prepared profile:
+  At/above 1.0 m forward corridor clearance: up to 0.50 m/s reference cruise.
+  Between 1.0 and 0.65 m: taper toward 0.08 m/s close approach.
+  At/below 0.65 m or without usable corridor surfaces: hold/replan.
+  Nominal reference acceleration: 0.25 m/s^2; bend cap: 0.15 m/s.
+  Maximum position-reference lead: 0.28 m; tracking pause guard: 0.35 m.
+  Preferred obstacle margin: 0.80 m; assumed vehicle radius: 0.30 m.
+  Sensor near range: 0.50 m; start-area prior: 0.60 m clear hover area.
+
+Distances are from the chassis/reference centre, not from rotor tips. The stop
+threshold is a decision trigger, not a measured stopping-distance guarantee.
+These speeds are reference limits in simulated seconds. The controller may
+advance more slowly when actual tracking lags. The dashboard separately shows
+reference and measured horizontal speed. A polyline bend/end can also slow it.
+The prior and body radius are assumptions; the start area must actually be clear.
+
+6. BUILDING A MAZE THAT TESTS EXPLORATION
+----------------------------------------
+Keep the initial room inside the current map: world x/y from -6 to +6 m.
+An 8 m room centred near (0,0) fits. The current map is fixed at 120x120 cells,
+resolution 0.1 m. A larger or translated maze requires map-bound changes.
+
+Use 2.2 m or wider clear corridors initially. The preferred 0.8 m margin on
+both walls consumes 1.6 m before discretization; narrower passages can be
+rejected even if a point-sized drone could fit. Width is the free wall-to-wall
+gap, not the wall centre spacing. Wall thickness around 0.15-0.3 m is convenient.
+Keep a flat unchanged floor, walls at least 1.5 m above it, collisions enabled,
+and LiDAR-visible surfaces. Avoid stairs/low tunnels: this planner is fixed-height
+2-D, and assumes vertical clearance through the route. It does not plan Z motion.
+
+Suggested first scene: an L-shaped corridor, a second turn into a hidden room,
+and a visible dead-end branch. Start with a clear 0.6 m hover area. From the
+starting view the sensor should see the first wall/corner, not the whole maze.
+End the maze with a closed room/wall so finite returns are available; the mapper
+does not turn a missing/no-return beam into verified free space.
+
+Save a separate maze USD. Preserve /World/quadcopter/chassis, sensor path,
+physics, ROS sensor/clock/TF graphs and sensor mounting. For a major rebuild,
+land, stop Isaac and rebuild the scene; this is a world/origin change, not an
+ordinary publisher reload. Reinitialize the bridge/PX4 as described in README.
+Start a fresh navigator/map after changing geometry so old free cells are absent.
+The operator owns scene changes, takeoff, mode selection and landing.
+
+7. RUNNING THE NEW EXPLORER
+---------------------------
+New code is on disk. The previously running navigator retains its older code
+until an operator reload; the first live exploration run remains pending.
+
+If already airborne and only reloading the program:
+  a. At pxh>, commander mode auto:loiter; commander status must report Hold.
+  b. Ctrl+C in the old ROS navigator; handle Terminate batch job with Y if asked.
+  c. In the same ROS Jazzy/Pixi terminal run:
+     C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_navigate.cmd
+  d. Reload http://127.0.0.1:8787/. Wait for READY and fresh map.
+  e. At pxh>, commander mode offboard; verify commander status reports Offboard.
+  f. Click Explore unseen space once. Hold here cancels exploration.
+
+For a new scene, establish the native 1 m hover first using the existing
+docs/BRIDGE_SETUP.txt procedure and operator commander takeoff, then use the same
+handover. READY in the terminal means target readers/heartbeat are established;
+the browser also requires fresh map, valid alignment and a stable Offboard hover.
+
+Observer-only preview (no PX4 publishers):
+  C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_navigate.cmd --observe
+Do not run observer and controller on the same port. A separate observer may
+use --port 8788. The browser controls stay disabled in observer mode.
+
+A session selects -> travels -> reaches -> waits for a NEW scan -> selects again.
+It pauses on sensing/frame/tracking faults; Resume requires restored valid data.
+It finishes when no useful reachable candidate is found, after three viewpoints
+with less than 0.08 m² added each, or after the configured 20 reached viewpoints.
+Finishing holds position. It does not imply every cell of a maze was discovered.
+Manual goals and Hold cancel exploration. Leaving armed Offboard cancels it too.
+
+8. TEACHING SEQUENCE AND EVIDENCE
+---------------------------------
+One larger lab: hide a room behind two turns and press Explore once.
+Before running, ask the student to predict which frontier will be selected.
+During the run, identify one transition in each layer:
+  1. More unknown cells become observed after moving around a corner.
+  2. A frontier goal is selected without an operator destination click.
+  3. A route remains inside observed space and avoids occupied walls.
+  4. Position targets advance, measured position follows, PX4 remains Offboard.
+After the run, explain one pause/finish using its reason rather than guessing.
+
+Use the same layout twice to compare settings. Record observed area versus
+delivered simulated time, viewpoints reached, measured travel, reference versus
+actual speed, goal error and any hold/failsafe. Coverage needs a denominator:
+without a labelled true traversable-area mask, report newly observed m², not an
+invented percentage of the maze. Count FREE and OCCUPIED observations, excluding
+the assumed START_AREA. Expected information gain is only a ranking heuristic.
+
+Observable files in logs/:
+  navigation_state.json: latest controller/goal/pose/speed/exploration snapshot.
+  navigation_trace.jsonl: new-version 2 Hz history with simulated integration
+    time, measured XY, speed, goal and exploration status. Use it to plot travel
+    and progress; it is an observed record, never a flight-control input.
+  ros2_navigation_status.json: diagnostic at a message change, not a heartbeat.
+  isaac_bridge.jsonl: motor/transport/physical bridge diagnostics.
+  navigation_sensor.json: last operator-applied LiDAR near-range setting.
+  mapped_goal_reached.json: first live mapped-goal endpoint proof (older profile).
+  exploration_replay.json: offline explorer replay proof, NOT a flight result.
+
+Current evidence:
+  Live Isaac/PX4 manual goal: planned route 6.52 m; REACHED; about 1-3 cm endpoint
+  error; approximately 1 m height; Offboard, no failsafe at the endpoint check.
+  The full measured trajectory/minimum clearance of that run was not recorded.
+  New software: 42 navigation tests pass, including auto arrival/scan/reselection,
+  stale data, operator cancellation, target lead and speed settings.
+  Offline ideal 2-D room with an occluding wall: two automatic viewpoints,
+  30.47 m² newly observed, 10.78 m measured travel, 27.6 simulated seconds.
+  It verifies geometric logic with a simple response model, not PX4/Isaac flight.
+  New faster settings and live autonomous exploration are awaiting operator run.
+  A read-only frontier selection on the current captured live map found a
+  reachable viewpoint near (3.05,0.05), with a roughly 1.39 m route and 2.83 m²
+  estimated information gain. This was previewed, not commanded as a flight.
+  Proof: exploration_live_choice.json and exploration_dashboard_preview.png.
+
+Run software checks in the Pixi environment:
+  pixi run --manifest-path C:\IsaacSim-ros_workspaces\jazzy_ws\pixi.toml cmd /d /c C:\Users\finel\Documents\ChatGPT\issaac\tools\check_navigation.cmd
+Run the complete offline replay:
+  pixi run --manifest-path C:\IsaacSim-ros_workspaces\jazzy_ws\pixi.toml python C:\Users\finel\Documents\ChatGPT\issaac\tools\replay_exploration.py
+Both are verification tools. They create no flight publishers or mode commands.
+
+9. TROUBLESHOOT BY OWNERSHIP
+-----------------------------
+No dots: Isaac LiDAR graph, render product, Play, Zenoh router and cloud probe.
+Dots but no map: cloud frame/stamp, capture-time TF, floor/height and map bounds.
+Goal refused: observed-space/clearance mask, stable hover, fresh position/map.
+No route through a corridor: width versus twice the preferred margin; inspect
+unknown boundaries as well as walls. A* does not solve unobserved geometry.
+Explorer finished with unknown left: inspect accessibility, clearance, visited
+points, the limited candidate search and progress/goal limits.
+Map changed but drone does not move: phase/reason, Offboard status and target lead.
+Automatic Return/Land: inspect PX4 failsafe and ROS state before blaming LiDAR.
+Fresh MAVLink motors but no ROS status: XRCE/agent link is a separate connection.
+Second setpoint publisher: stop the older hover/step program in native PX4 Hold.
+Changed sensor mounting: update and restart its static TF; do not guess offsets.
+
+10. READING AND PROJECT HISTORY
+--------------------------------
+Primary-source background:
+  Frontier cells and exploration algorithms (research paper):
+  https://www.frontiersin.org/journals/robotics-and-ai/articles/10.3389/frobt.2021.616470/full
+  PX4 Offboard heartbeat and position-control interface:
+  https://docs.px4.io/v1.17/en/flight_modes/offboard
+These explain concepts; local source and live measurements define this install.
+The explorer is our small implementation, not a drop-in copy of those packages.
+
+README.md is the repository entry point. docs/BRIDGE_SETUP.txt is the bridge
+launch reference; docs/MAPPED_NAVIGATION.txt covers mapped goals and earlier
+results. EXPERIMENTS.txt is the roadmap. The notes under docs/history/ preserve
+earlier LiDAR, clearance, flight and movement lessons. Their historical 'pending'
+statements are not the current status; use this guide and newer dated evidence.
+
+Source cleanup verification, 2026-10-14:
+  tools/check_all.cmd runs every test in isolated ROS domain 97. All 119 tests
+  pass. Python lint/format checks, dashboard JavaScript syntax, HTML formatting,
+  WSL shell syntax and the offline exploration replay also pass. This cleanup
+  does not reload or change the running simulator/flight-controller processes.

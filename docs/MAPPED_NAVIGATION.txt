@@ -1,0 +1,168 @@
+Persistent mapped-goal navigation
+=================================
+The user requested a larger milestone instead of repeated one-shot movement
+experiments. This combines persistent commands, a fixed-height ray map, path
+planning, route following, speed bands and a local map interface.
+Implemented on 2026-10-14. 42 navigation checks pass, including a full detour
+with a one-second response lag. A live map is now receiving scans after the
+operator applied the 0.5 m sensor setting. The first operator-commanded mapped
+goal reached its destination in live Isaac/PX4 on 2026-10-14; see result below.
+Current extension: TEACHER_GUIDE.txt documents frontier exploration and the
+faster 0.5 m/s profile. Both are prepared on disk; live exploration is pending.
+Settings are loaded from config/navigation_settings.json at process start.
+
+Use
+---
+1. In Isaac Script Editor, apply the requested 0.5 m LiDAR near range:
+   import runpy; runpy.run_path('C:/Users/finel/Documents/ChatGPT/issaac/tools/configure_navigation_lidar.py')
+   The script prints Near range = 0.5 m and saves a setting report. It changes
+   no timeline, flight mode or body geometry, and does not save the scene.
+   Confirm the existing hover area is clear within 0.6 m of the chassis.
+2. Preview while keeping the existing flight program running:
+   C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_navigate.cmd --observe
+   Open http://127.0.0.1:8787. Click an observed destination outside the amber
+   obstacle margin. The dashed route is a preview; flight controls are disabled.
+   This mode creates no PX4 publishers. Ctrl+C closes its owned map worker.
+3. For flight, select commander mode auto:loiter in PX4 and confirm Hold.
+   Stop the old ROS step/hover program and the preview program with Ctrl+C.
+   Start one persistent controller:
+   C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_navigate.cmd
+   Reload the map page so it receives the new control session. Wait for READY,
+   select commander mode offboard in PX4, and verify commander status.
+4. Click a reachable observed destination, review the dashed route, then press
+   Navigate to destination. The controller follows the route without repeated
+   move commands. REACHED holds the endpoint; another goal needs no restart.
+   Hold here cancels the goal and holds measured position. Resume goal replans
+   a paused goal after a sensing interruption, with fresh map and stable hover.
+   Leave the publisher running while in Offboard. The operator remains in
+   charge of arming, takeoff, mode changes, scene changes and landing.
+
+Representation
+--------------
+World XY, 0.1 m cells, a 12 by 12 m map centred on the existing test room.
+Returns within -0.3..+0.4 m of chassis world height contribute to the 2-D map.
+Only valid finite return rays clear cells, starting outside the configured
+0.5 m blind range. Nearest endpoints in 720 angular bins mark obstacles;
+space beyond endpoints and directions without usable rays remain unknown.
+Later valid rays can clear a removed obstacle. Rays alone do not certify an
+entire 3-D volume; this is a slow, fixed-height model of the flat room/boxes.
+
+Blue start cells are an explicit prior: the initial 0.6 m area around the
+existing stationary hover is assumed clear. It bridges the sensor blind area
+to observed space. Subsequent current vehicle footprints use only 0.35 m.
+This prior is shown separately from ray-observed free cells, never erases an
+observed obstacle, and must not be mistaken for measured LiDAR clearance.
+
+The planner excludes unknown space and applies 0.3 m body clearance to the
+known-space boundary, with a preferred 0.8 m obstacle margin. An initial hover
+closer to a wall may escape only through known body-free cells, with obstacle
+clearance nondecreasing and at most 2 m before reaching the preferred margin.
+A* cannot cut diagonal obstacle corners. Route shortcuts are checked again.
+Initially pose comes from Isaac TF, not SLAM. The installed bridge produces GPS
+from its exact ENU/NED axis swap, so position axes are not rotated by an
+estimated heading bias. At stable hover an origin translation aligns PX4 local
+NED with the world map; the separately captured heading bias is used only for
+the attitude consistency check. Actual coordinate
+reset counters still latch the old position guard; world/PX4 disagreement
+over 0.2 m or 15 degrees pauses navigation rather than guessing a new origin.
+
+Motion and distance bands
+-------------------------
+Current prepared profile: at/above 1 m observed clearance in the travel corridor,
+up to 0.5 m/s reference cruise. From 1 to 0.65 m, taper toward 0.08 m/s.
+At/below 0.65 m, or without observed corridor surfaces: hold and replan.
+The virtual corridor follows travel direction, using all-direction world
+returns, rather than only chassis +X. Yaw and requested height stay fixed.
+Nominal speed ramp changes use 0.25 m/s^2 in delivered IMU integration time;
+emergency hold captures measured position, so actual braking must be measured.
+Polyline bends cap speed at 0.15 m/s. Tracking headroom limits reference lead
+to 0.28 m and can slow/stop its advance sooner. These are reference limits, not certified
+aircraft speed, acceleration or stopping-distance guarantees.
+
+The heartbeat remains steady-wall-clock 10 Hz with PX4 receipt timestamp zero.
+Route progress uses received simulated IMU periods; slow physics does not
+compress the trajectory into host time. Clock confirmation freezes progress.
+Tracking error >0.35 m, height error >0.25 m, invalid velocity, callback gap
+>0.5 wall seconds, map loss or frame disagreement pause/cancel movement.
+Fresh valid position can continue a fixed hover stream during perception loss.
+Stale/invalid position or an origin reset stops all output. No automatic arm,
+flight mode or VehicleCommand messages are sent.
+
+Route changes and measured close obstacles trigger a hold and automatic
+replanning once stable. Sensing/clock/frame faults require explicit Resume.
+Leaving armed Offboard cancels the goal and recaptures current hover before
+another handover, preventing a stale endpoint from pulling the vehicle back.
+Exactly one flight-target publisher is allowed.
+
+Implementation and checks
+-------------------------
+navigation/mapping.py       ray map and exact dependency-free distance fields
+navigation/planning.py      inflated-space route planning and start escape
+navigation/motion.py        frame alignment, speed bands, persistent follower
+navigation/exploration.py   reachable frontier viewpoints and session progress
+navigation/settings.py     validated launch-time parameter loading
+config/navigation_settings.json  current speed, margin and exploration settings
+navigation/feed.py          bounded live Zenoh worker pipe and freshness
+navigation/dashboard.py    localhost-only map/preview/operator command queue
+tools/navigation_map_worker.py  capture-time cloud/TF processing; no flight outputs
+ros2_navigate.py            Fast DDS PX4 controller; no arming/mode commands
+config/navigation.html     map, route preview, Navigate/Hold/Resume controls
+
+HTTP binds only 127.0.0.1. Commands require the owning page's per-run token;
+cross-origin posts are rejected. Preview mode rejects all flight commands.
+Saved logs are evidence, not control input. No cloud service receives data.
+navigation_state.json records measured position, target, goal, phase and clock.
+
+Run tools\check_navigation.cmd in the Jazzy/Pixi environment. 42 tests pass:
+ray/blind/occlusion behavior, start-prior preservation, removed obstacles,
+exact distance fields, box detours, unknown barriers, corner constraints,
+start escape, frame round trips, speed bands, whole-route control lag,
+repeated goals, sensor loss, resets, duplicate publishers, callback stalls,
+velocity validity and observer/cross-origin command rejection. No flight
+publishers are created by those tests. Interface layout was inspected in the
+browser while waiting for the sensor setting. The first live goal result is
+recorded below. New exploration checks cover frontier selection, scan-driven
+reselection, cancellation, sensor loss, bounded lead and the faster profile.
+The offline replay adds a complete occluded-room exploration example.
+
+Live preview result, 2026-10-14
+-----------------------------
+The operator applied near range 0.5 m and supplied its confirmation. The
+observer now receives fresh capture-time point clouds and world transforms,
+with more than 1,000 scans processed and about 4,650 observed cells. The map
+shows room boundaries, the obstacle and its unobserved shadow. A browser click
+at world XY approximately (2.5,-1.3) produced a four-point route around the
+obstacle through observed traversable space. The route is about 6.0 m long.
+This was a preview, not a commanded flight. The old step publisher remains
+the only flight-target source. Saved proof: logs/live_map_preview.json,
+logs/mapped_navigation_verified.json and logs/navigation_map_preview.png.
+Position-axis calibration was checked against the installed GPS bridge;
+25 navigation tests pass including separation of heading bias from position.
+
+First live mapped goal, 2026-10-14
+---------------------------------
+The operator confirmed native PX4 Hold, stopped the old one-shot publisher,
+started the persistent navigator, selected Offboard, and commanded a map goal.
+The resulting controller state is REACHED. PX4 independently reports armed
+Offboard with no failsafe; live cloud/TF map data remain fresh. At the first
+check, controller horizontal error was about 0.014 m and height 0.999 m above
+PX4 local origin. The planned path detours around the mapped obstacle from
+approximately (-3.66,-0.40) to (2.53,-1.13) in world XY.
+Saved evidence: logs/mapped_goal_reached.json, including planned route, measured
+endpoint, live map snapshot and PX4 status. This is endpoint evidence, not a
+full measured flight trajectory or a minimum-clearance measurement. The
+controller remains running and holding the endpoint; another goal needs no
+publisher restart. Standard ROS map/path publication for RViz is not yet added.
+This first live run used the preceding 0.25 m/s, 1.1 m margin, 0.9 m stop profile.
+The later faster settings do not change that already running process.
+
+Exploration extension, 2026-10-14
+--------------------------------
+Explore unseen space selects reachable observed viewpoints near unknown cells,
+travels using the existing planner/follower, waits for a new scan after arrival,
+then selects again. Hold cancels the session; sensing faults pause for Resume.
+It stops at the viewpoint/progress limit or when no useful reachable candidate
+is found, which does not claim complete coverage of all unknown cells.
+42 tests pass. tools/replay_exploration.py chose two viewpoints in an offline
+occluded-room example and observed 30.47 m² beyond the starting scan. This is
+not an Isaac/PX4 flight result. Operator reload and live exploration are pending.

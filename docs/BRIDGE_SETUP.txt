@@ -1,0 +1,203 @@
+PX4 -> Isaac rotor physics bridge
+
+Current experiment and teaching guide (2026-10-14): TEACHER_GUIDE.txt.
+It explains each terminal, the core files, clocks/frames, maze design, operation
+and measured evidence. Frontier exploration and the faster profile are prepared;
+see config/navigation_settings.json. Live exploration requires an operator
+controller reload in native PX4 Hold; the prior manual goal reached successfully.
+
+LiDAR continuation (2026-10-12): see docs/history/LIDAR_SETUP.txt for the current evidence,
+read-only live scene inspection, bounded ROS message probes, raw RViz config,
+and exact start/stop/test commands. Delivery, time and frame transforms pass.
+Forward-clearance processing: see docs/history/CLEARANCE_SETUP.txt. The stationary room
+baseline measures about 8.48 m and emits recommendations without flight output.
+PX4 state check: in a ROS Jazzy/Pixi terminal, run tools\px4_state_probe.cmd.
+This observes versioned position/status/landed topics for eight seconds and
+writes logs/px4_state.json. It never publishes flight messages. A stream pass
+does not prove Isaac is connected: SIH also publishes these topics. Verify the
+Isaac bridge has fresh actuator packets and PX4 uses px4_sitl_default with the
+project's rcS-isaac startup, not px4_sitl_sih. See docs/history/FLIGHT_NEXT.txt.
+First horizontal movement: see docs/history/MOVEMENT_SETUP.txt. tools\ros2_step.cmd holds
+until the operator types move, then requests one 0.5 m forward step and holds.
+Movement advances using delivered simulated IMU integration periods; the
+10 Hz heartbeat uses steady computer time. Slow Isaac physics therefore
+extends the real-time movement duration instead of rushing the target.
+LiDAR-gated movement: docs/history/NAVIGATION_SETUP.txt. --require-clearance enables the
+observed-surface stop/refusal gate and owns its perception worker. The default
+step command remains unguarded. Experiment roadmap: EXPERIMENTS.txt.
+Persistent mapped-goal navigation: docs/MAPPED_NAVIGATION.txt. tools\ros2_navigate.cmd
+--observe shows a map/route preview without flight publishers; the controller
+version accepts repeated map goals after one operator Offboard handover.
+Use --observe for a map-only preview; it creates no flight publishers.
+
+Project: C:\Users\finel\Documents\ChatGPT\issaac
+
+The bridge receives HIL_ACTUATOR_CONTROLS from PX4, converts each normalized
+motor command into rotor speed, and applies quadratic thrust and yaw torque
+through PhysX. It sends actual simulated IMU, magnetometer, barometer and GPS
+feedback to PX4. PX4 runs the external simulator target rather than SIH physics.
+
+First setup in Isaac
+-------------------
+1. Stop the timeline and open your drone scene.
+2. Keep /World/quadcopter/chassis as a dynamic Rigid Body. Kinematic Enabled
+   must be off. Keep gravity on. The scene must use metres, kilograms, Z-up.
+3. Under /World/quadcopter/joints, set the lower and upper angular limits to 0
+   on rotor_arm0, rotor_arm1, rotor_arm2 and rotor_arm3. These are the folding
+   arm hinges, NOT the propeller rotor0..3 joints. Ensure no joint anchors the
+   drone to the world. Start the drone level, just above a collidable floor.
+4. Disable any controller/graph/script that writes the drone body's pose,
+   velocity or motor forces. Sensor ROS publishers may stay enabled.
+5. /PhysicsScene must have downward Earth gravity. Direction (0,0,-1) or USD's
+   default (0,0,0) both mean downward in a Z-up scene. A negative/default
+   gravity magnitude means Earth gravity; explicit 9.80665 is also supported.
+   This initial NumPy bridge sets CPU PhysX/MBP and physics to 250 Hz when loaded.
+
+Launch order
+------------
+1. Close the old PX4 - SITL (SIH) instance. If it is running, enter shutdown at
+   its pxh> prompt. Run only one PX4 instance.
+2. Open PX4 - XRCE DDS Agent once. The existing Windows v2.4.3 agent uses port
+   8888. An already running agent does not need another copy.
+   To stop an old agent instance, use PX4 - Stop XRCE DDS Agent on the desktop;
+   then open PX4 - XRCE DDS Agent again. The stop shortcut targets only the
+   installed PX4 agent executable; it does not stop PX4 or Isaac.
+3. Open the NEW desktop shortcut PX4 - Isaac SITL. It waits for Isaac on WSL
+   UDP port 14560. Its window remains open on errors.
+4. In Isaac, open Window > Script Editor, with the timeline still stopped.
+   Execute these two lines:
+
+   import runpy
+   runpy.run_path("C:/Users/finel/Documents/ChatGPT/issaac/load_bridge.py")
+
+5. Press Play. Wait for [PX4 bridge] ... fresh=True ... in the Isaac console
+   and for PX4 to finish startup. Allow at least 15 simulated seconds for the
+   EKF/GPS checks to settle. Motors should be zero while disarmed.
+   Each Script Editor execution prints [PX4 bridge loader] Fresh source loaded
+   and the raw/effective gravity directions. The loader compiles the project
+   files directly to bypass Kit's persistent import-code cache.
+6. Keep the drone disarmed for the initial read-only state check described in
+   docs/history/FLIGHT_NEXT.txt. The operator performs arming, takeoff and mode selection.
+   The upstream px4_ros_com offboard_control example automatically arms and
+   commands a 5 m climb; it is not the next step for this room experiment.
+
+Verification
+------------
+Isaac console: armed=True, fresh=True, nonzero and changing motors, thrust > 0,
+and the body's world z changing. JSONL diagnostics: logs/isaac_bridge.jsonl.
+
+In a second PX4 - ROS 2 Terminal:
+
+ros2 topic echo /fmu/out/vehicle_status_v4 px4_msgs/msg/VehicleStatus --qos-reliability best_effort
+
+ros2 topic echo /fmu/out/vehicle_command_ack_v1 px4_msgs/msg/VehicleCommandAck --qos-reliability best_effort
+
+These are versioned topic names for this PX4 checkout. Use explicit message
+types to avoid consulting the ROS daemon from your separate Zenoh terminal.
+For listing: ros2 topic list --no-daemon --spin-time 10
+
+Manual ROS hover target (after the existing 1 m takeoff/hover works)
+----------------------------------------------------------------
+Keep Isaac playing, its bridge loaded, PX4 - Isaac SITL and the XRCE agent running.
+In PX4 - ROS 2 Terminal:
+
+python C:\Users\finel\Documents\ChatGPT\issaac\ros2_hover.py --height 1.0
+
+Alternatively, in a ROS Jazzy/Pixi terminal, use the wrapper that explicitly
+selects Fast DDS/domain 0 and sources the PX4 message overlay:
+C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_hover.cmd --height 1.0
+
+This publisher captures current local X/Y and heading, then publishes a position
+target at 10 Hz with NED Z = -height. Height is relative to PX4's local origin.
+It never arms or changes flight mode. It pauses targets if position is invalid
+or no advancing position message has arrived for one wall-clock second.
+Outgoing commands request PX4 receipt-time stamping (timestamp=0), verified
+against this installed build's XRCE decoders. Sensor timestamps are not reused
+as command timestamps. Position/height/heading resets latch a fault and stop output;
+leave Offboard, then restart the publisher to capture the new origin.
+Backward mapped timestamps require three advancing valid samples for motion.
+The fixed target/heartbeat continue only within the previous trusted sample's
+one-second freshness bound; the correction itself never refreshes that bound.
+Publisher diagnostic changes are saved to logs/ros2_hover_status.json.
+Wait for READY (both input topics have readers and five seconds were streamed).
+Then, in PX4 - Isaac SITL at pxh>:
+
+commander mode offboard
+
+PX4 should continue the 1 m hover, now following the ROS target. To land, enter
+commander land; after the command is accepted, stop this publisher with Ctrl+C.
+Do not stop the publisher while still in Offboard unless intentionally testing
+PX4's configured Offboard-loss action. Do not run another setpoint publisher
+at the same time. To change height later, switch to Hold with
+commander mode auto:loiter, restart the publisher with the new --height, wait
+for READY, then select Offboard again. Start with a small height change.
+Message construction check (no ROS connection or flight commands):
+pixi run --manifest-path C:\IsaacSim-ros_workspaces\jazzy_ws\pixi.toml cmd /d /c C:\Users\finel\Documents\ChatGPT\issaac\tools\check_ros2_hover.cmd
+
+Landing / stop / restart
+-----------------------
+In the PX4 SITL console: commander land
+After landing mode is confirmed, stop the Offboard example with Ctrl+C so it
+does not continue requesting hover. Wait for the body to land and disarm.
+For an immediate simulation motor cutoff: commander disarm -f
+Pausing Isaac freezes simulated time; stopping it closes the bridge.
+After Stop/reset, shut down and restart PX4 - Isaac SITL, load the bridge again
+while Isaac is stopped, then press Play. Do not reuse PX4 across a time reset.
+
+Configuration and model limits
+------------------------------
+bridge_config.json contains body paths, rotor positions, ordering, coefficients,
+noise and simulator address. WSL's IPv4 address is discovered on every load.
+Body convention: forward +X, left +Y, up +Z (FLU); world is ENU.
+Motor mapping for NVIDIA's Quadcopter asset:
+  PX4 0 = FR = rotor3 = yaw sign -
+  PX4 1 = RL = rotor1 = yaw sign -
+  PX4 2 = FL = rotor0 = yaw sign +
+  PX4 3 = RR = rotor2 = yaw sign +
+The bridge reads rotor centres from the composed scene. The starter's control
+allocation geometry assumes the stock square asset with arm coordinates
+0.10253 metres; update both the config and starter for a different aircraft.
+
+omega = normalized_motor_command * omega_max, with first-order motor lag.
+thrust_i = k_f * omega_i^2; reaction_yaw_i = sign_i * k_m * omega_i^2.
+Moment arms are included. The summed wrench is applied at chassis COM.
+All thrust is cut immediately on disarm or when actuator packets are older
+than 0.5 wall-clock seconds. The bridge never sets body velocity or pose.
+
+With k_f/k_m null, coefficients are starting estimates from the total rigid
+body mass, hover command 0.5 and yaw moment arm 0.05 m. They are NOT measured
+propeller coefficients. No aerodynamic drag, wind, propwash or visual rotor
+animation is implemented. This is an initial free-flight/control integration.
+Small sensor noise is necessary for PX4 stuck-sensor checks and gyro FIFO
+quantization. Sensor coordinates are converted from ENU/FLU to NED/FRD.
+
+Installed dependencies / build
+------------------------------
+pymavlink 2.4.50 is private to .vendor; global Isaac and Pixi Python unchanged.
+PX4 built successfully: target px4_sitl_default, current main checkout,
+commit 9fda8a51a4952dd6964fb7e2c86e0a4f748f740b, source tree clean.
+Artifact: /home/finel/PX4-Autopilot/build/px4_sitl_default/bin/px4
+Linux libopencv-dev installed to resolve the Windows Conda/OpenCV contamination.
+Runtime startup adaptation lives under /home/finel/.local/share/px4-isaac;
+the PX4 firmware source and your saved drone scene were not edited.
+
+Tests: X:\isaacsim\6.1.0\python.bat tests\test_physics.py
+Private headless validation tool: tools/headless_validate.py
+It creates its own test chassis and never opens your saved scene.
+Validation artifacts are under results/ and C:\px4-tools\offboard-results.
+2026-10-05 verification: all 7 physics/transport tests passed. Live ROS Offboard
+mode/arm commands were accepted, the private Isaac chassis rose to about 5 m,
+then landed and disarmed. ROS proof passed:
+C:\px4-tools\offboard-results\20261005T085933Z\result.json
+PhysX/MAVLink evidence:
+results/20261005-105802/verified_result.json
+At that October 5 checkpoint, the user drone asset still required the scene
+setup above and had not been tested in the open scene. Later hover and mapped
+goal flight results are documented in TEACHER_GUIDE.txt and
+docs/MAPPED_NAVIGATION.txt; this paragraph preserves the earlier checkpoint.
+
+References
+----------
+https://docs.px4.io/main/en/simulation/index
+https://mavlink.io/en/messages/common.html#HIL_ACTUATOR_CONTROLS
+https://mavlink.io/en/messages/common.html#HIL_SENSOR

@@ -1,0 +1,70 @@
+Roadmap: from measured movement to autonomous exploration
+=========================================================
+The user requested larger increments: repeated control, mapping and route
+planning are now being combined into one mapped-goal navigation milestone.
+See docs/MAPPED_NAVIGATION.txt and TEACHER_GUIDE.txt. The first live map-goal flight
+reached its destination on 2026-10-14. Frontier exploration and a faster profile
+are now prepared; their live run remains pending.
+Every stage has a question, predicted result, measured result and explanation.
+The operator controls simulator changes, arming and flight-mode handovers.
+All experiments remain simulated. A code/test result is distinct from a
+completed flight experiment. Current status is recorded explicitly below.
+
+0. Follow one command -- completed
+Request a 0.5 m forward step and hold its endpoint.
+Evidence: measured travel about 0.503 m, sideways 0.015 m, height 0.999 m.
+Lessons: PX4 versus ROS roles, Offboard, NED/ENU, feedback, simulation timing.
+
+1. Stop using sensed evidence -- earlier isolated lesson
+Refuse a step with a nearby obstacle; stop an allowed step as it approaches;
+then remove sensing and verify UNKNOWN stops further movement.
+Measure trigger distance, stopping travel, sensor age and actual mode/height.
+Lessons: perception latency, thresholds, feedback, confidence and failure modes.
+Status: implementation, 68 tests and live perception check pass. Flight pending.
+
+2. Run repeated bounded commands -- combined into persistent mapped controller
+Replace one-shot restart choreography with one persistent controller that
+accepts individual operator steps/turns while retaining the obstacle gate.
+Run an out-and-back or square experiment; measure endpoint error and drift.
+Lessons: state machines, command ownership, frames and repeatability.
+
+3. Build a map while moving -- live pipeline verified
+Transform validated LiDAR rays into occupied, observed-free and unknown cells.
+Initially use Isaac world TF as known localization, aligned with PX4's origin.
+Scan from multiple viewpoints and compare the map with the room geometry.
+Measure map consistency, unknown area and coverage of observed space.
+Lessons: coordinate transforms, ray tracing, occupancy and localization error.
+
+4. Reach a goal through known space -- first live goal completed
+Choose a goal beyond the box. Find a route through observed free space with
+aircraft clearance; follow it using bounded movement and retain stop guards.
+Measure goal error, minimum clearance and behavior when the route is blocked.
+Lessons: path planning, footprint inflation, trajectory following and replanning.
+Result: planned 6.52 m detour, REACHED, about 1-3 cm endpoint error, height
+approximately 1 m, armed Offboard with no failsafe at endpoint verification.
+Full trajectory/minimum flight clearance were not recorded in that first run.
+
+5. Choose the next place to inspect -- current larger milestone
+Detect boundaries between observed free and unknown space. Select a reachable
+viewpoint, plan, move, scan and repeat until no useful reachable frontier remains.
+Run the same policy in several differently arranged rooms.
+Measure coverage versus simulated time, travel distance and failures.
+Lessons: frontier exploration, information gathering and autonomous decisions.
+Status: 42 navigation tests pass. Offline replay selected two viewpoints and
+revealed 30.47 m² of hidden space. Updated live explorer awaits operator reload.
+Scene suggestion: 2.2 m corridors, multiple corners and a dead end, preserving
+the current floor/sensor/bridge. Current settings: cruise up to 0.5 m/s, slow
+below 1 m, stop at 0.65 m, LiDAR near range 0.5 m, obstacle margin 0.8 m.
+
+6. Challenge the assumptions
+Add timing delays, dropped scans, noise, moved obstacles and localization drift.
+Replace perfect world localization with an estimated pose when ready.
+Measure degradation, recovery and whether stops occur before collisions.
+Lessons: robustness, estimation, SLAM/localization and realistic evaluation.
+
+7. Investigate learned exploration, if useful
+Keep the geometric explorer as a baseline. Collect simulated runs and train
+a policy to choose viewpoints or exploration actions. Test in unseen rooms
+against the baseline with the same coverage/time/clearance metrics.
+Lessons: datasets, rewards, training, generalization and honest comparisons.
+Learning chooses exploration decisions; bounded flight control remains separate.

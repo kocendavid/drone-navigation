@@ -1,0 +1,7 @@
+.git/
+.vendor/
+.tools/
+logs/
+results/
+shortcut-backups/
+node_modules/

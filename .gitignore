@@ -1,0 +1,21 @@
+.vendor/
+.tools/
+__pycache__/
+*.pyc
+logs/
+results/
+.pytest_cache/
+*.log
+
+# Local diagnostic dependencies, operator backups and development caches.
+shortcut-backups/
+.ruff_cache/
+.venv/
+node_modules/
+
+# Flight recordings and local scene assets are experiment data, not source.
+*.ulg
+*.usd
+*.usda
+*.usdc
+*.usdz

@@ -1,0 +1,239 @@
+HISTORICAL EXPERIMENT NOTES
+Dated results and troubleshooting are preserved below. For the current setup,
+read README.md and TEACHER_GUIDE.txt in the project root.
+
+Next experiment: connect the actual Isaac drone to PX4, then verify hover
+=====================================================================
+2026-10-12 evidence
+LiDAR clearance: about 8.48 m to the observed wall, no flight output.
+ROS hover message construction check passes; live hover still unverified.
+The read-only PX4 probe receives valid position, status and landed messages.
+However, the process discovered at 16:45 Prague is px4_sitl_sih (internal
+physics), while Isaac's bridge shows fresh=False and zero actuator packets.
+These are separate simulated vehicles. DDS delivery alone is insufficient.
+Update at 16:56 Prague: the operator switched to the correct px4_sitl_default
+process with rcS-isaac. The live bridge now has fresh actuator packets with
+zero motors while disarmed. That verifies the MAVLink/physics connection.
+XRCE is a separate link: its status is Running, disconnected, and the eight-
+second ROS probe receives zero messages despite discovering DDS publishers.
+The agent is listening on 172.29.240.1:8888 (Windows WSL interface). A clean
+agent-session restart is the next operator diagnostic; root cause unproven.
+Update at 17:03 Prague: after the operator reset the agent, ROS received 278
+advancing position messages in ten seconds, plus fresh status and landed
+messages. Position and velocity are valid, preflight checks pass, the drone
+is landed and disarmed, and no setpoint publishers are running. Native
+MIS_TAKEOFF_ALT is already 1 m. The next operator command at pxh> is
+commander takeoff, with a clear overhead volume. This command also arms.
+The agent reset restored delivery; the original disconnect cause is unproven.
+Update at 17:09 Prague: the operator confirms native takeoff and landing.
+Bridge diagnostics show an approximately 1.04 m rise (world Z -0.7545 to
++0.2898) and return to the original height, disarmed with fresh zero-motor
+packets. This verifies a native control experiment, not ROS Offboard hover.
+
+Operator action to establish the correct flight connection
+---------------------------------------------------------
+1. Leave it disarmed. At the existing PX4 SIH pxh> prompt, enter shutdown.
+   This is a PX4 console command, not Windows shutdown.exe. From a Windows
+   prompt, while SIH instance 0 is the running instance, its client command is:
+   wsl -d Ubuntu --exec /home/finel/PX4-Autopilot/build/px4_sitl_sih/bin/px4-shutdown --instance 0
+2. Stop Isaac's timeline to reset the simulator before a fresh PX4 instance.
+3. Keep the existing XRCE agent; do not open a duplicate.
+4. Open this project launcher from a Windows terminal:
+   C:\Users\finel\Documents\ChatGPT\issaac\start-isaac-px4.cmd
+   It must print: Isaac PX4 SITL: waiting for Isaac sensor data on WSL UDP 14560.
+   The launcher refuses to start while another PX4 instance is running.
+5. While Isaac is stopped, run in its Script Editor:
+   import runpy
+   runpy.run_path('C:/Users/finel/Documents/ChatGPT/issaac/load_bridge.py')
+6. Press Play. Wait at least 15 simulated seconds for estimation to settle.
+   Isaac must show armed=False, fresh=True, zero motors while disarmed.
+   logs/isaac_bridge.jsonl must be updating and actuator_packets must increase.
+   Report errors instead of selecting a flight mode when these checks fail.
+
+Read-only state check
+---------------------
+In a ROS 2 Jazzy terminal (Pixi environment), run:
+   C:\Users\finel\Documents\ChatGPT\issaac\tools\px4_state_probe.cmd
+It selects Fast DDS/domain 0, subscribes for eight wall-clock seconds, then
+exits. No setpoint, arming or mode publishers are created. Results go to
+logs/px4_state.json. Repeated timestamps do not count as fresh progress.
+It reports heading quality, position validity, arming/mode/failsafe, landed
+state and competing setpoint publisher counts. Numeric mode/arming fields
+use the installed px4_msgs constants. state_streams_pass is only a delivery
+and position check, not permission to fly or proof of the correct simulator.
+Stop a bounded probe early with Ctrl+C if needed; it sends no commands.
+recent_motion reports the last up to five seconds of valid progressing
+position samples: mean local NED Z, Z span, maximum vertical/horizontal
+speed and horizontal span. Inspect these alongside actual Isaac body motion.
+status_history records arming/mode/failsafe transitions. offboard_samples and
+last_observed_offboard_motion retain measurements from the last observed
+Offboard segment even if the operator lands before this bounded check ends.
+These are historical observations, not a current flight-state heartbeat.
+For a handover recording, run the probe for a bounded window, for example:
+   tools\px4_state_probe.cmd --duration 45 --output logs\ros_hover_handover.json
+
+XRCE disconnect diagnostic while disarmed
+----------------------------------------
+The MAVLink motor bridge can remain healthy while XRCE/ROS is disconnected.
+Keep the correct Isaac SITL and Isaac running. Open PX4 - Stop XRCE DDS Agent,
+then PX4 - XRCE DDS Agent. PX4's client automatically attempts reconnection.
+Read-only status at the actual pxh> prompt: uxrce_dds_client status
+Read-only status from Windows:
+   wsl -d Ubuntu --exec /home/finel/PX4-Autopilot/build/px4_sitl_default/bin/px4-uxrce_dds_client --instance 0 status
+Then rerun tools\px4_state_probe.cmd in a Jazzy/Pixi terminal. Verify delivered,
+advancing state messages; created writers or discovered topics are not enough.
+The installed agent is 2.4.3, the version listed for ROS Jazzy in current PX4
+documentation. Do not change versions or firewall settings without evidence.
+
+After connection is verified
+----------------------------
+First confirm a stationary native PX4 hover with the operator's commands.
+Then use ros2_hover.py to hand that same position/height to ROS Offboard.
+It has passed its installed-message construction check, but the actual
+Isaac drone response remains to be measured. PX4 local-origin height is not
+Isaac world Z; the floor is currently below world zero.
+The operator selects flight modes and lands. Only one target publisher runs.
+The perception process is Zenoh and the PX4 process is Fast DDS. A fresh,
+explicitly validated connection between these processes is still required
+before clearance can control motion. The JSON log is not that connection.
+Also verify the actual box produces HOLD inside 2 m, and pausing produces
+UNKNOWN; seeing the room wall as CLEAR is not that test.
+
+Stationary ROS hover handover: operator procedure
+------------------------------------------------
+1. Keep Isaac playing and both PX4/agent processes running. At pxh> enter
+   commander takeoff, then wait for the native 1 m hover to settle.
+2. In a separate ROS Jazzy/Pixi terminal, run:
+   C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_hover.cmd --height 1.0
+   It captures current local X/Y and heading, and targets local NED Z=-1 m.
+   Wait for READY after five seconds of fresh targets with PX4 readers.
+3. At the PX4 pxh> prompt, enter commander mode offboard.
+   Confirm Offboard is accepted; observe a stationary hover for 10 seconds.
+   If it is rejected, report the console reason rather than forcing the mode.
+4. At pxh> enter commander land. After landing mode is accepted, stop the
+   ROS publisher with Ctrl+C. Observe landing and disarming.
+   To stop the test while airborne, select landing first, not Ctrl+C.
+
+The original publisher reused received PX4/XRCE timestamps; this is superseded
+by the receipt-time fix documented in docs/history/MOVEMENT_SETUP.txt. Windows ROS wall time
+differs from the observed PX4/agent timestamps. Duplicate packets do not
+refresh its one-second wall-time watchdog. Position/height/heading
+resets stop output and latch a restart requirement rather than reusing an
+old target in a new coordinate origin. This lets PX4's configured Offboard-
+loss response take over when state is stale; it does not promise a hover
+without valid state. The test has no automatic arming or mode selection.
+Message construction plus twelve clock/reset/publish-path unit tests pass.
+Tests use in-memory publisher stubs and create no ROS flight publishers.
+
+2026-10-13 handover result: automatic landing needs diagnosis
+-----------------------------------------------------------
+The completed PX4 record is fs/log/2026-10-13/08_56_59.ulg under the Isaac
+SITL runtime rootfs. A read-only analysis is saved in
+logs/hover_flight_record_analysis.json (private pyulog dependency in .tools).
+Offboard was accepted at +96.516 s in the PX4 record. Mean local NED Z during
++97..110 s was -0.9903 m, with a 0.0340 m span. At +116.820 s the Offboard
+signal-loss flag became true; at +116.832 s PX4 selected Return with failsafe
+active, then landed and disarmed. No commander-land command is in the record.
+Battery warning/health/remaining-time flags stayed clear. The console's
+"battery warning (fast)" tone does not establish a battery failure here.
+Position/height validity and reset counters remained unchanged throughout.
+Current flight state is landed/disarmed. The hover Python process remains
+alive, but PX4's last Offboard heartbeat is stale and its XRCE receive rate
+is zero. A separate 20 s read-only replay of the current received position
+through HoverState got 652 messages without a fault. The original publisher
+warning is needed to distinguish a latched guard from other publisher or
+delivery problems. Do not mark sustained ROS hover as verified yet.
+Stop the hover publisher with Ctrl+C in its own terminal after selecting
+landing mode (or once already landed/disarmed); do not stop the separate
+forward_clearance or LiDAR/TF publishers. Ending the target stream while
+airborne in Offboard can itself activate PX4's configured fallback.
+
+The operator supplied the original publisher warning, confirming it latched
+the combined clock/origin reset guard. Since the ULog shows unchanged reset
+counters and valid positions, the received timestamp moved backward without
+an aircraft coordinate reset. XRCE's changing timestamp offset or delivery
+ordering can produce that; the guard incorrectly treated either as proof
+of a PX4 reset. The exact transport correction is not recorded in this ULog.
+The first correction treated a backward mapped timestamp as a temporary
+pause and requires three advancing valid samples with unchanged origin
+before resuming the original target. Duplicates/repeated clock oscillations
+cannot satisfy that recovery; invalid samples restart it. Actual position,
+height or heading reset counters still latch a fault. The wall watchdog
+remains in place. Tests pass; sustained flight after this fix is unverified.
+Diagnostic messages now also save logs/ros2_hover_status.json. That file is
+an atomic snapshot at a diagnostic change, not a continuously live heartbeat.
+The currently running process retains the old source until the operator
+stops it and starts the updated publisher. Since the drone is currently
+landed/disarmed, Ctrl+C in the ROS hover terminal is appropriate now.
+The wrapper now titles its terminal ROS - Isaac Hover Target to distinguish
+it from the PX4 pxh> console and the perception terminals. To retest: stop
+the old publisher while landed/disarmed, request native takeoff, start the
+updated wrapper after hover settles, wait for READY, select Offboard, observe
+for 60 seconds while leaving the publisher running, then request landing.
+Stop the publisher after landing mode is accepted. No flight commands or
+live flight-process restarts are issued by the agent.
+
+Subsequent 0.5 m movement verified: forward 0.5068 m, sideways 0.0133 m,
+height 1.0006 m, followed by a brief Offboard/Return interruption.
+The step flight record establishes heartbeat timestamps jumping backward
+6..7 s while PX4's own position clock and origin stay valid. The final clock
+fix sends command timestamp=0 for PX4 receipt-time stamping, verified using
+the installed generated decoder bodies. During short clock confirmation,
+the fixed target and heartbeat retain bounded last-good freshness, with
+movement paused; genuinely stale/invalid data still stop output. See
+docs/history/MOVEMENT_SETUP.txt for details and 26 passed tests. Subsequent live verification
+passed: 1,260 internal heartbeats without backwards timestamps or signal-loss
+flags, maximum gap 0.148 s; about 88.7 s of recorded armed Offboard simulation
+time without a Return/failsafe transition. The operator remains airborne in
+Offboard with the updated step publisher; landing was unnecessary for reloading
+it while PX4 was in native Hold. See logs/clock_fix_flight_analysis.json.
+
+The subsequent step stopped at 0.354 m tracking error because the reference
+advanced in computer time while PX4/Isaac physics advanced at roughly 0.3x.
+The target reached 0.390 m while measured motion was only 0.036 m. PX4 remained
+armed Offboard without signal loss. Movement now counts received simulated
+IMU integration periods, while the heartbeat stays on steady wall time.
+Dropped/rejected periods slow movement and cannot cause time catch-up. The
+tracking limit remains 0.35 m. All 34 tests pass; this pacing correction still
+needs a new operator flight. Reload in native Hold, then wait for READY,
+select Offboard and request move. See docs/history/MOVEMENT_SETUP.txt and the tracking
+analysis/sensor pacing reports for measured evidence.
+The next operator flight did reach the endpoint: subsequent measured forward
+0.5028 m, lateral 0.0151 m, height 0.9990 m; direct PX4 checks confirmed armed
+Offboard without a current failsafe or offboard signal loss. Thus the pacing
+fix has passed one arrival/endpoint-hover experiment. Saved evidence is in
+logs/paced_step_verified.json. LiDAR-based movement decisions are still separate.
+
+2026-10-14: LiDAR stop/refusal gate prepared
+-----------------------------------------
+Optional --require-clearance owns a Zenoh perception worker and receives fresh
+reports through a bounded local pipe. Three fresh scans permit movement;
+observed distance <=2.20 m or UNKNOWN stops it while retaining a valid fixed
+target heartbeat. Default flight behavior is unchanged. 68 tests pass. A live
+perception-only check measures about 3.0 m and confirms CLEAR. Operator flight
+with this gate is pending. Current airborne floor independently measured at
+-0.76965 m; its 8.9% support is below the 15% automatic-calibration criterion.
+Details and operator procedure: docs/history/NAVIGATION_SETUP.txt. Roadmap: EXPERIMENTS.txt.
+
+How the drone will discover its room
+----------------------------------
+Proposed first exploration behavior (not yet implemented): fixed altitude,
+small horizontal steps, low speed, stop and scan between steps.
+Build a map with occupied, observed free and unknown cells. Empty point-cloud
+regions alone are not free-space evidence; use validated sensor rays and
+clearance for the aircraft volume. For the first map, Isaac world TF is
+simulation ground-truth localization. Later localization can use onboard
+estimates; the map/world and PX4 local-origin alignment must be measured.
+Select a reachable viewpoint at the boundary of observed free and unknown
+space, plan through observed free space, follow a bounded trajectory, stop,
+update the map and repeat. This is frontier exploration. A simple geometric
+policy is an understandable baseline; it needs no trained model.
+PX4 tracks the trajectory and controls motors. The exploration policy picks
+where to go. Later a learned policy could rank viewpoints; evaluate it on
+new rooms against this baseline, measuring coverage, collisions, clearance,
+time and inference latency. Learning is a later experiment, not a claim
+that the current drone already knows how to explore.
+
+References
+https://docs.px4.io/main/en/flight_modes/offboard
+https://www.cs.cmu.edu/~motionplanning/papers/sbp_papers/integrated2/yamauchi_frontier_explor.pdf

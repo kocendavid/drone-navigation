@@ -1,0 +1,106 @@
+HISTORICAL EXPERIMENT NOTES
+Dated results and troubleshooting are preserved below. For the current setup,
+read README.md and TEACHER_GUIDE.txt in the project root.
+
+First LiDAR-gated movement experiment
+====================================
+Prepared on 2026-10-14. Offline wiring and live perception verified;
+operator flight with the new gate has not yet been performed.
+
+Purpose
+-------
+Measure how sensed distance changes a movement decision, how far the aircraft
+continues after that decision, and what happens when sensing becomes UNKNOWN.
+The preceding 0.5 m movement verified trajectory tracking and endpoint hover.
+This increment connects a bounded stop/refusal rule to that trajectory.
+
+Data and decisions
+------------------
+The movement program remains Fast DDS/domain 0 for PX4. With
+--require-clearance it owns a separate Zenoh/domain 0 perception process.
+That process runs the existing cloud/clock/capture-time TF processing and
+publishes the usual RViz points/markers. It streams measured JSON directly
+through a local pipe to its owning movement controller. No saved JSON file
+is read as a flight input. No additional clearance terminal is needed.
+
+Three distinct, fresh CLEAR scans are required to allow a requested step.
+The nearest observed forward surface must be farther than 2.20 m: the original
+2 m zone plus a 0.20 m experiment reserve. The source RViz box turns red at
+2 m; the controller can therefore veto motion while the source box is green.
+This reserve is a test setting, not a proven stopping-distance guarantee.
+During movement, HOLD, UNKNOWN, stale data or a dead worker stop the step at
+the current measured X/Y and keep requesting the same height/heading.
+The position watchdog still controls whether it is valid to publish at all.
+Losing perception does not deliberately shut down a healthy hover heartbeat.
+
+The pipe has a per-run session and same-host monotonic generation times.
+Records older than 0.6 s on receipt are rejected. Record age is bounded at
+0.8 s, cloud/clock age and scan progress at 1 s. Buffered/repeated messages
+cannot refresh an old cloud. Frames, corridor settings, floor readiness,
+surface state/distance and nearest point are validated. A reset or UNKNOWN
+requires renewed confirmation. An aborted step never restarts automatically.
+Heading drift over 10 degrees ends the forward-sensing experiment.
+
+Floor setting for this room
+--------------------------
+An independent capture-time cloud/TF probe on 2026-10-14 measured a broad
+plane at world Z=-0.76965 m, span about 8.65 by 7.90 m, residual p95 0.008 m.
+It matches the earlier landed calibration. At 1 m hover it represents only
+8.9% of returns, so the default stationary calibration's 15% support test
+correctly refuses it. Use the measured height explicitly for this flat room.
+Do not reuse this height after changing the room floor or world reference.
+
+Observe without flight publishers
+---------------------------------
+In a Jazzy/Pixi terminal:
+C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_step.cmd --clearance-check --clearance-floor-z -0.76965
+This runs only perception and the decision gate for 12 wall seconds, saves
+logs/clearance_gate_probe.json, then closes its own perception worker.
+It creates no PX4 targets, arms nothing and sends no flight-mode commands.
+
+Operator flight procedure
+------------------------
+If airborne in Offboard, first select commander mode auto:loiter at PX4 pxh>.
+Confirm commander status reports Hold before Ctrl+C the old ROS step program.
+Keep Isaac playing, PX4, XRCE Agent, Zenoh router and mounting TF running.
+Launch exactly one movement publisher from the Jazzy/Pixi terminal:
+C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_step.cmd --height 1.0 --distance 0.5 --require-clearance --clearance-floor-z -0.76965
+Wait for READY. [LiDAR gate] reports CLEAR/HOLD/UNKNOWN and the actual reason.
+Then select commander mode offboard in PX4 and verify commander status.
+The operator requests move or hold in the ROS movement terminal.
+READY describes the flight stream; a LiDAR UNKNOWN can still refuse move.
+
+Experiment A: refusal
+Place the box ahead, with its near face beyond the 1 m sensor blind range
+but inside 2.20 m. Use measured distance rather than the box center.
+Prediction: move prints MOVE refused by LiDAR, drone continues hovering,
+reference stays at zero, and the one step remains unused.
+After moving the box back, three fresh clear scans can permit a new request.
+
+Experiment B: stopping during motion
+With a new unused step, place the near face at roughly 2.4..2.6 m.
+Prediction: initial CLEAR permits movement; closing distance crosses 2.20 m
+and STEP STOPPED: LiDAR ends the trajectory before the intended 0.5 m endpoint.
+Record trigger distance, subsequent minimum distance and extra forward travel,
+height/sideways drift, phase and PX4 mode/failsafe state. Use native Hold for
+reloading between one-shot experiments; landing is optional when finishing.
+
+Experiment C: perception failure
+After the baseline stop is measured, test loss of the perception worker or
+cloud/clock input. Prediction: UNKNOWN ends active movement while valid PX4
+position supports the fixed target heartbeat. A controller/position failure
+is different and can still invoke PX4's own failsafe.
+
+Verification and limits
+-----------------------
+49 flight/decision tests and 19 perception/delivery tests pass (68 total).
+The live perception-only run measured the surface at about 3.00..3.02 m and
+confirmed CLEAR after three progressing scans. It stopped its own worker.
+No flight process was restarted and no flight command was issued by the agent.
+The existing running unguarded program keeps its old source until the operator
+reloads it with --require-clearance. The default movement command is unchanged.
+
+This is an observed-surface gate for a forward corridor in a flat test room.
+Missing rays do not prove free volume. Low excluded objects, sensor blind
+regions and unobserved geometry remain limitations. There is no map, path
+planner or autonomous obstacle bypass yet. Experiment roadmap: EXPERIMENTS.txt.

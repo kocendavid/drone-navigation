@@ -1,0 +1,387 @@
+HISTORICAL EXPERIMENT NOTES
+Dated results and troubleshooting are preserved below. For the current setup,
+read README.md and TEACHER_GUIDE.txt in the project root.
+
+LiDAR increment 1: observable delivery, scene inventory and raw viewer
+===================================================================
+Project: C:\Users\finel\Documents\ChatGPT\issaac
+Inspection date: 2026-10-12 (Europe/Prague)
+
+Current evidence
+----------------
+The project already contains a MAVLink/PhysX bridge and a manual ROS hover
+publisher. ros2_hover.py does not arm or select modes. Its flight on the user
+drone has not been verified by this increment. Earlier JSONL diagnostics are
+dated October 5; they are not evidence of current flight or realistic physics.
+
+The running Isaac log identifies C:\Users\finel\Desktop\scene.usd.
+Read-only inspection of that SAVED ROOT LAYER found:
+  sensor: /World/quadcopter/chassis/Example_Rotary (OmniLidar)
+  sensor local translate: (0,0,0), identity orientation and scale
+  publisher: /Graph/ROS_LidarRTX/LaserScanPublish
+  configured type: point_cloud (despite its node name)
+  configured topic: /lidar/points
+  configured frame_id: lidar_link
+  RenderProduct.cameraPrim points at the existing sensor
+  clock graph: /Graph/ROS_Clock
+  TF graph: /Graph/ROS_TF (target is /World/quadcopter)
+The saved layer does not resolve sensor profile defaults and does not show
+unsaved live changes. A frame_id string does not create a TF frame.
+
+Pixi activates rmw_zenoh_cpp and domain 0. PX4's terminal launcher explicitly
+uses rmw_fastrtps_cpp, domain 0, UDPv4 profile C:\px4-tools\fastdds.xml.
+These are separate middleware networks. The running Isaac environment still
+needs confirmation from the live inspector. No live process was restarted.
+
+Initial 12-second subscription runs in both middleware environments received
+zero clouds, zero /clock messages and zero PX4 local-position messages.
+After the operator played Isaac and ran the live inspector, a new Zenoh probe
+received 724 /clock messages in 12 seconds, with advancing fresh clock time,
+but still zero clouds and no /lidar/points publisher. A separate topic listing
+showed /clock, /imu/data and /tf, with no PointCloud2 topic under another name.
+Fast DDS discovered PX4 endpoints; discovery alone does not prove delivery.
+Reports: logs\lidar_dds.json, logs\lidar_zenoh.json,
+         logs\lidar_scene_saved.json, logs\lidar_scene_live.json.
+
+The LIVE composed scene confirms Zenoh/domain 0, metres/Z-up, an active
+sensor beneath the chassis, identity sensor-to-body USD transform, SENSOR
+output frame, tickRate=10 Hz and scanRateBaseHz=10 Hz. Near range is 1 m and
+far range 200 m: an absence of returns inside 1 m cannot prove clear space.
+The LiDAR render product exists, but its orderedVars contains only LdrColor;
+GenericModelOutput is not attached in the scene snapshot. The LiDAR helper's
+runtime execution and writer attachment are the next diagnostic targets.
+The sensor's auxiliary channels=[NONE] has not been identified as the cause.
+
+Runtime inspection received at 13:29 Prague time: the timeline was stopped
+at time zero during both snapshots. Relevant extensions, graphs and node
+types were valid. All LiDAR nodes had compute_count=0; the render-product
+output path was empty, while the clock publisher had 83,625 computations
+recorded. The earlier composed scene identifies the LiDAR graph's stage as
+pipelineStageOnDemand. This makes scheduling the likely cause: On Demand
+graphs need explicit evaluation; simply including OnPlaybackTick does not
+put them into the regular simulation pipeline.
+
+Targeted operator scene change: with Isaac paused/stopped, run these lines
+in its Script Editor to change only /Graph/ROS_LidarRTX scheduling:
+
+import omni.graph.core as og
+import omni.timeline
+assert not omni.timeline.get_timeline_interface().is_playing(), "Pause Isaac first"
+lidar_graph = og.get_graph_by_path("/Graph/ROS_LidarRTX")
+assert lidar_graph is not None and lidar_graph.is_valid(), "LiDAR graph missing"
+print("Before:", lidar_graph.get_pipeline_stage(), "Disabled:", lidar_graph.is_disabled())
+lidar_graph.change_pipeline_stage(og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_SIMULATION)
+print("After:", lidar_graph.get_pipeline_stage())
+
+Expected After: GRAPH_PIPELINE_STAGE_SIMULATION. The script does not restart
+PX4 or change the timeline. If Disabled is True, report that before changing
+anything else. The operator controls resuming Isaac. After resuming, run the
+runtime inspector again and the 15-second Zenoh probe. Expected evidence:
+LiDAR Tick compute count increases; RenderProduct and helper have executed;
+renderProductPath is nonempty; an actual PointCloud2 publisher is observed
+and usable XYZ messages arrive. Only save the scene change after verifying
+the result.
+
+Verified after the operator's scheduling change at 13:36 Prague time:
+both graphs are in SIMULATION stage and enabled, with the timeline playing.
+LiDAR Tick and RunOnce advanced by 59 computations in one second.
+RenderProduct and the helper each executed once, produced a valid render
+product path, and attached GenericModelOutput, the extractor and ROS writer.
+The helper initializes the render pipeline once; it need not compute every
+sensor scan. This verifies graph scheduling and writer initialization.
+
+A subsequent 15-second Zenoh observation received 874 clock messages,
+discovered a PointCloud2 publisher for /lidar/points, but received zero clouds.
+Report: logs/lidar_zenoh_after_scheduling.json. Useful sensor delivery remains
+unverified. Runtime inspection now also reads render-pipeline node counts,
+scalar data pointers/buffer sizes and relevant host-buffer/Motion BVH settings.
+It neither copies sensor buffers nor changes USD, settings or timeline state.
+Run the same runtime inspector while playing for that deeper report.
+The kit log warns that Motion BVH is off for multi-tick rendering; this is
+an accuracy issue to resolve before motion experiments, but the warning alone
+does not establish why zero messages arrive. No settings were changed.
+
+Delivery verified at 14:01 Prague time after the operator reported streaming:
+147 usable PointCloud2 messages in 15 seconds, approximately 9.73 Hz arrival
+and 10 Hz sensor stamps, no decoding errors, around 124,600 finite XYZ points
+per scan. Middleware is Zenoh/domain 0. The frame is now point_cloud, rather
+than lidar_link. This confirms actual ROS delivery, not merely graph discovery.
+Report: logs/lidar_zenoh_streaming.json.
+
+Frame/time verification is still incomplete: /clock is approximately 2591.44 s
+ahead of cloud stamps. An 8-second follow-up confirms the persistent offset;
+the TF tree contains world -> chassis and rotor links stamped in the same
+time range as the clouds, but no point_cloud frame. The last graph inspection
+had clock ReadSimTime.resetOnStop=False while TF and clouds reset on Stop.
+Use a current scene inspection before changing frame mappings: the sensor
+mount and output coordinate convention may have changed with the stream fix.
+Report: logs/lidar_zenoh_frames.json (includes TF frame inventory).
+The raw RViz preset now uses Fixed Frame=point_cloud for viewing raw XYZ
+without a transform; this does not establish a sensor-to-body transform.
+The live scene inspector also inventories a named TestObstacle cube.
+
+Operator explanation of the successful configuration: recreated the LiDAR
+graph, restarted the Jazzy Zenoh router and placed the sensor above the drone
+body. The drone is at one end of an 8 m wide test room. These were multiple
+changes, so no single root cause is proven for the final delivery fix.
+The composed scene report on disk is still from 12:51, before those changes;
+its zero sensor offset and graph names/settings must not be treated as current.
+The raised mount requires measuring the new sensor-to-chassis transform.
+The room width does not establish forward wall clearance or prove a 2 m
+threshold crossing. A visible wall can be the first stationary obstacle,
+but its forward distance must be measured and compared with the point cloud.
+No TestObstacle placement has yet been confirmed by the operator.
+
+Frame/time increment verified at 16:18 Prague time:
+The new 16:09 composed scene measures the sensor origin as
+(0,0,0.0591487379025617) m in chassis, aligned axes, SENSOR output.
+PointCloudPublish now supplies frame_id=point_cloud. No named TestObstacle
+exists; the operator sees the room represented by points in RViz.
+The operator changed /Graph/ROS_Clock/ReadSimTime.inputs:resetOnStop to True
+while paused and resumed Isaac. The subsequent observer measured clouds and
+/clock within 72 ms, matching the resetting TF time range.
+
+We temporarily published the measured static chassis -> point_cloud mount
+using tf2_ros static_transform_publisher. The final observer received 57/57
+usable clouds in six wall seconds, 10 Hz sensor stamps, 108 ms end-of-window
+clock skew, and 57/57 capture-time transforms into world. No TF failures or
+pending requests remained; delivery_pass and frame_time_pass are both True.
+Report: logs/lidar_frame_time_verified.json.
+The temporary TF publisher was stopped after verification. The operator can
+start the same measured publisher in a ROS 2 Jazzy terminal and keep it running:
+
+C:\Users\finel\Documents\ChatGPT\issaac\tools\lidar_mount_tf.cmd
+
+Stop this node with Ctrl+C in that terminal; keep only one publisher for this
+sensor child frame. If the mount or frame names change, remeasure and update
+the command. It sends TF only and contains no flight commands.
+In the current RViz window, change Global Options > Fixed Frame to world to
+use world -> chassis -> point_cloud. Alternatively open the saved preset:
+
+rviz2 -d C:\Users\finel\Documents\ChatGPT\issaac\config\lidar_world.rviz --ros-args -p use_sim_time:=true
+
+The scene clock change should be saved by the operator after this verification.
+The raw preset remains sensor-relative for diagnostics without TF.
+
+Observer improvement: when checking TF, collect one second of TF history
+before the cloud observation window, then allow up to 0.3 wall seconds for
+independently delivered TF to arrive. All lookups still use acquisition stamps;
+never substitute the latest transform. Missing/late TF, zero stamps and stale
+streams still fail. Eight tests passed, including delayed and missing TF.
+This verifies the static mount and transform availability, not the physical
+accuracy of moving-scan compensation or a flight/navigation policy.
+Reference for Reset On Stop:
+https://docs.isaacsim.omniverse.nvidia.com/6.1.0/py/source/extensions/isaacsim.core.nodes/docs/ogn/OgnIsaacReadSimulationTime.html
+Reference:
+https://docs.omniverse.nvidia.com/kit/docs/omni.graph.docs/latest/dev/Architecture.html
+
+First objective (selected by the operator)
+--------------------------------------------------------------
+Start with forward obstacle clearance -> a stop/hold recommendation.
+Before connecting flight, use a stationary drone and a visible test obstacle
+at measured distances along its forward axis. Measure whether the pipeline
+detects crossing a provisional 2 m threshold and reports UNKNOWN on stale,
+empty, invalid, untransformed or unsynchronized input. The 2 m value is an
+experiment threshold, not a validated stopping distance. Later choose speed,
+acceleration, vehicle radius, latency margin and clearance from measured
+flight behavior. Do not train a model before this baseline works.
+
+The initial increment implemented inspection only. Forward-clearance
+processing has now been added after delivery and frame/time verification;
+see docs/history/CLEARANCE_SETUP.txt for its measured baseline, displays and commands.
+It publishes recommendations and visualization only, with no trajectory,
+motor, arming or mode publishers. The physical 2 m crossing is still pending.
+
+First obstacle: operator placement, no flight movement
+-----------------------------------------------------
+With the drone stationary, use Pause in Isaac for scene editing. In Script
+Editor run the read-only placement calculator:
+
+import runpy; runpy.run_path("C:/Users/finel/Documents/ChatGPT/issaac/tools/plan_obstacle.py")
+
+It reads the paused chassis physics pose and sensor offset, then prints
+Translate and Rotate values. It rejects a playing timeline, tilted drone,
+nonunit sensor scale and transformed /World. It creates no geometry, changes
+no timeline state and sends no commands. Report: logs\obstacle_plan.json.
+
+Select /World, create a Cube using Create > Shape > Cube, and name it
+TestObstacle. Ensure it is a Cube shape with Geometry Size=1; set Scale XYZ
+to (0.2,2,2), then copy the printed Translate and Rotate values. Leave it
+visible. Apply Physics > Collider if it has none; leave Rigid Body absent
+so it stays fixed. Parent it directly under /World, not under the quadcopter.
+
+The box is 0.2 m thick, 2 m wide and 2 m high. Its centre is 3.1 m ahead along
+horizontal drone-forward. Subtracting half the thickness places the near face
+3 m from the LiDAR, beyond its 1 m near range and the provisional 2 m hold
+threshold. Geometry presence alone does not verify LiDAR. Check its visible
+placement first; resume only when you choose, then look for sensor points on
+the face at about 3 m forward range. Other room geometry may be closer.
+NVIDIA cube creation and static collider references:
+https://docs.isaacsim.omniverse.nvidia.com/6.1.0/robot_setup_tutorials/tutorial_intro_assemble_robot.html
+https://docs.isaacsim.omniverse.nvidia.com/latest/physics/simulation_fundamentals.html
+
+1. Inspect the LIVE scene (Isaac Script Editor)
+---------------------------------------------
+Run this; it does not edit USD, start/stop the timeline, load the flight bridge,
+or add graph/sensor duplicates:
+
+import runpy
+runpy.run_path("C:/Users/finel/Documents/ChatGPT/issaac/tools/inspect_lidar_scene.py")
+
+Output: logs\lidar_scene_live.json and a short console summary. Check:
+  timeline_playing and timeline_time_s
+  rmw_environment and domain_environment
+  sensors, relative sensor/body transforms and composed sensor attributes
+  graphs_and_nodes, enabled inputs, connections and render_products
+USD default transforms can differ from live PhysX poses while playing.
+
+For the current silent LiDAR helper, run this second read-only check in the
+same Isaac Script Editor. No USD edits or graph evaluations are forced:
+
+import runpy
+runpy.run_path("C:/Users/finel/Documents/ChatGPT/issaac/tools/inspect_lidar_runtime.py")
+
+After about one second it writes logs\lidar_runtime.json. It captures two
+snapshots of actual OmniGraph input/output values, node registration,
+compute counts and messages, relevant extension states and render variables.
+USD inputs that are null in the earlier report may have runtime defaults;
+do not treat null authored values as evidence that the helper is disabled.
+The snapshots distinguish an unexecuted helper from writer initialization or
+sensor-output failure before making a targeted operator scene change.
+
+If the timeline is stopped, sensor delivery is not expected. You control when
+to Play; do not change the timeline just to make a probe pass when flight state
+is uncertain. If scene changes are needed, you perform them in Isaac. First
+reuse the existing LiDAR and graphs. Validate the actual sensor mounting:
+the saved sensor is at the chassis origin, so body self-occlusion is possible.
+Choose a mount above the visual chassis with a clear scan field; use actual
+asset dimensions, not an invented offset. Check world scale is metres/Z-up.
+
+Existing helper inputs to inspect, rather than create another helper:
+  enabled = true; type = point_cloud; topicName = /lidar/points
+  frameId = lidar_link; useSystemTime = false for simulation timestamps
+  RenderProduct cameraPrim = existing sensor path
+  Context wired to the helper; domain 0 throughout the chosen network
+  Tick -> RunOnce -> RenderProduct -> helper execution chain
+  /clock time input from IsaacReadSimulationTime, not system time
+Use the live report and Isaac console errors to distinguish a stopped timeline,
+disabled graph, missing render product, sensor issue and middleware mismatch.
+The channels=[NONE] setting in the saved sensor concerns auxiliary output;
+do not assume it explains the missing XYZ cloud or turn on all metadata blindly.
+
+For the installed 6.1 helper, frameSkipCount and fullScan are deprecated; set
+sensor omni:sensor:tickRate using its resolved profile and verify its agreement
+with omni:sensor:Core:scanRateBaseHz for rotating scan accumulation. Do not
+change physics timestep to tune LiDAR rate. Local source checked:
+X:\isaacsim\6.1.0\exts\isaacsim.ros2.nodes\isaacsim\ros2\nodes\ogn\OgnROS2RtxLidarHelperDatabase.py
+NVIDIA tutorial (current version; some older UI steps remain in the text):
+https://docs.isaacsim.omniverse.nvidia.com/latest/ros2_tutorials/tutorial_series/tutorial_ros2_rtx_lidar.html
+
+2. Verify useful data (named terminals; no flight commands)
+---------------------------------------------------------
+In PX4 - ROS 2 Terminal (already sourced; cmd or PowerShell):
+
+python C:\Users\finel\Documents\ChatGPT\issaac\tools\lidar_probe.py dds --duration 15 --output C:\Users\finel\Documents\ChatGPT\issaac\logs\lidar_dds.json
+
+In ROS 2 Jazzy - Terminal (Zenoh, existing router running):
+
+python C:\Users\finel\Documents\ChatGPT\issaac\tools\lidar_probe.py zenoh --duration 15 --output C:\Users\finel\Documents\ChatGPT\issaac\logs\lidar_zenoh.json
+
+Alternatively in a new PowerShell terminal, this explicitly sources Pixi and
+the PX4 overlay without changing an existing terminal or middleware daemon:
+
+pixi run --manifest-path C:\IsaacSim-ros_workspaces\jazzy_ws\pixi.toml cmd /d /c C:\Users\finel\Documents\ChatGPT\issaac\tools\ros_observe.cmd dds --duration 15 --output C:\Users\finel\Documents\ChatGPT\issaac\logs\lidar_dds.json
+
+Replace dds with zenoh and output filename with lidar_zenoh.json for that check.
+The probe stops automatically after the wall-time window. Ctrl+C stops it
+early and marks the observation incomplete. It creates no persistent daemon.
+It uses best-effort/volatile sensor subscriptions to receive compatible
+best-effort OR reliable publishers. use_sim_time is true; observation duration
+and stale checks use monotonic wall time so a paused simulator cannot hang it.
+
+Read FIRST_CLOUD and the final JSON, rather than a topic list. The probe's own
+subscription can make the topic appear in topic_types. Publishers=[] and
+cloud_messages=0 mean no publisher/data was observed in that window.
+It decodes FLOAT32/FLOAT64 XYZ by field offset, endian, point stride and row
+stride, checks NaN/Inf even if is_dense=true, and reports range/XYZ bounds.
+Ranges are sensor-coordinate diagnostics, not obstacle clearance in body FLU.
+
+delivery_pass requires >=3 usable clouds, stable nonempty frame_id, advancing
+positive stamps, >=2 Hz wall arrival rate and no >1 s wall-time gap. Range
+window defaults to 0.2..30 m. Adjust --min-hz, --stale-after, --min-range and
+--max-range to measured sensor/simulation behavior; these defaults are gates
+for this experiment rather than the sensor's specification.
+
+frame_time_pass additionally requires advancing fresh /clock, timestamps
+within 0.5 s of /clock and a successful TF lookup at every cloud capture time.
+After inspecting the ACTUAL ROS body frame, add --target-frame BODY_FRAME to
+the above command. Do not substitute lidar_link as the body frame. Early TF
+startup failures conservatively fail this gate; rerun after graph warmup.
+No --target-frame means frame/time verification is incomplete.
+TF success proves availability only; the physical transform must still be
+checked with a known obstacle. These flags do not authorize flight.
+
+If Isaac publishes clouds only on Zenoh, processing/viewing can begin there.
+Before PX4 integration choose either an operator-approved relaunch of Isaac
+on the verified Fast DDS profile, or an explicit, tested cross-middleware
+relay. Domain 0 alone does not bridge Zenoh to DDS. This increment installs
+no relay and makes no middleware changes to running flight processes.
+
+3. View raw points after message delivery passes
+-----------------------------------------------
+In the SAME middleware terminal that actually receives the clouds:
+
+rviz2 -d C:\Users\finel\Documents\ChatGPT\issaac\config\lidar_raw.rviz --ros-args -p use_sim_time:=true
+
+Fixed Frame is point_cloud, the frame verified in the live ROS stream. If FIRST_CLOUD
+reports another frame, change Fixed Frame to that exact frame. The config
+shows XYZ points in flat cyan and best-effort QoS, sensor axes, a metre grid
+and available TF. Its interaction tools publish no goals or flight commands.
+Exit RViz by closing its window or Ctrl+C in its terminal.
+
+Using the sensor as Fixed Frame isolates raw rendering from missing TF. It
+does not verify world alignment, chassis attachment or scene geometry. The
+grid is sensor-relative, not a published floor. RViz does not automatically
+load Isaac's USD scene. A drone/world/scene overlay is pending actual TF and
+geometry publication. If clouds arrive but the display is empty, inspect
+RViz's PointCloud2 status, frame name, QoS and XYZ bounds; then focus the camera.
+
+For frame validation, the desired chain is a measured sensor -> drone FLU
+transform and a dynamic drone FLU -> Isaac world transform. Give the sensor
+ROS frame the same identity as the helper's frameId. Do not fake world->body
+with a static TF. Do not simply relabel world-coordinate points as lidar_link.
+
+Coordinate rules to preserve for later flight integration
+-------------------------------------------------------
+Isaac world is treated as ENU by the current bridge: X=east,Y=north,Z=up.
+Isaac body is FLU: X=forward,Y=left,Z=up. PX4 is NED/FRD.
+  vector ENU -> NED: (x,y,z) -> (y,x,-z)
+  vector FLU -> FRD: (x,y,z) -> (x,-y,-z)
+These vector conversions do not align different local origins. A world-space
+waypoint also needs the measured PX4/Isaac origin offset and frame alignment.
+Body directions need the current vehicle orientation to become local NED.
+Use the LiDAR frame transform first; header.frame_id alone is not conversion.
+PX4 timestamp synchronization is a separate concern from ROS /clock. Avoid
+changing ros2_hover.py timestamps until the installed PX4 synchronization path
+is checked. The LiDAR probe never sends PX4 timestamps or setpoints.
+
+Verification of the added code
+------------------------------
+New PowerShell terminal:
+
+pixi run --manifest-path C:\IsaacSim-ros_workspaces\jazzy_ws\pixi.toml cmd /d /c C:\Users\finel\Documents\ChatGPT\issaac\tools\check_lidar.cmd
+
+Tests cover padded rows, reordered fields, both byte orders, invalid returns,
+range limits, malformed layout and empty clouds. A real local ROS publisher
+sends test clouds, static TF and clock on unique PRIVATE test topics. It
+verifies successful receipt and frame/time gates, missing data, stale wall
+time, repeated stamps and a clock reset. It never publishes the live /clock,
+/tf or /fmu topics. Passing it proves diagnostic behavior, not Isaac delivery.
+
+Next increment after live data is verified
+-----------------------------------------
+Resolve and validate sensor/body/world transforms; verify raw points against
+one known obstacle. Then add a separate processing node with invalid/range
+filtering, voxel downsampling, body-frame clearance and markers, plus a
+decision-only stop/hold recommendation with freshness checks. Verify that
+before a single bounded setpoint publisher is connected by the operator.

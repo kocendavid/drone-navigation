@@ -1,0 +1,214 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 71
+    Name: Displays
+    Property Tree Widget:
+      Expanded: ~
+      Splitter Ratio: 0.4937500059604645
+    Tree Height: 538
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.4000000059604645
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 80; 80; 80
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: World grid (metres)
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Alpha: 0.4000000059604645
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 70; 160; 200
+      Color Transformer: FlatColor
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: Raw room points
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 2
+      Size (m): 0.009999999776482582
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /lidar/points
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 170; 40
+      Color Transformer: FlatColor
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: Forward surfaces after filtering
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 6
+      Size (m): 0.009999999776482582
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /navigation/forward_points
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Hold zone and clearance status
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /navigation/clearance_markers
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+        chassis:
+          Value: true
+        point_cloud:
+          Value: true
+        rotor0:
+          Value: true
+        rotor1:
+          Value: true
+        rotor2:
+          Value: true
+        rotor3:
+          Value: true
+        rotor_arm0:
+          Value: true
+        rotor_arm1:
+          Value: true
+        rotor_arm2:
+          Value: true
+        rotor_arm3:
+          Value: true
+        world:
+          Value: true
+      Marker Scale: 1
+      Name: Drone and sensor frames
+      Show Arrows: true
+      Show Axes: true
+      Show Names: false
+      Tree:
+        world:
+          chassis:
+            point_cloud:
+              {}
+          rotor0:
+            {}
+          rotor1:
+            {}
+          rotor2:
+            {}
+          rotor3:
+            {}
+          rotor_arm0:
+            {}
+          rotor_arm1:
+            {}
+          rotor_arm2:
+            {}
+          rotor_arm3:
+            {}
+      Update Interval: 0
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 25; 28; 35
+    Fixed Frame: world
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 6.995999813079834
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0.6609449982643127
+        Y: 2.2445008754730225
+        Z: 0.5014549493789673
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.5450001358985901
+      Target Frame: chassis
+      Value: Orbit (rviz_default_plugins)
+      Yaw: 3.125025987625122
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 750
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001420000029dfc0200000001fb000000100044006900730070006c00610079007301000000370000029d000000ca00ffffff000003060000029d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Width: 1100
+  X: 2
+  Y: 627

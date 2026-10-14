@@ -1,0 +1,238 @@
+HISTORICAL EXPERIMENT NOTES
+Dated results and troubleshooting are preserved below. For the current setup,
+read README.md and TEACHER_GUIDE.txt in the project root.
+
+First horizontal movement: one forward step
+==========================================
+Question: can PX4 follow a small changing position target while keeping
+height and heading? Prediction: about 0.5 m forward, little sideways drift,
+height near 1 m, then hover at the endpoint. First step observed and measured;
+the subsequent clock fix has now passed live Offboard verification below.
+
+The operator controls scene edits, takeoff, arming and flight modes.
+No live flight publisher or flight command was started during implementation.
+Keep Isaac, PX4 - Isaac SITL, and the XRCE Agent running.
+This movement program uses Fast DDS/domain 0. It does not read the Zenoh
+clearance output and does not provide obstacle avoidance.
+
+Operator procedure
+------------------
+1. While landed/disarmed, Ctrl+C the old ros2_hover.cmd publisher in its
+   own terminal. Do not run it alongside the step publisher.
+2. Keep the flight path open. The operator moved the box back; the latest
+   stationary clearance snapshot on 2026-10-13 measured 3.68 m and CLEAR.
+   That is evidence of observed forward surfaces, not a free-volume proof.
+3. At the PX4 - Isaac SITL pxh> prompt, request commander takeoff, as in the
+   successful native hover experiment. Let the 1 m hover settle.
+4. In a Jazzy/Pixi ROS terminal, run:
+   C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_step.cmd --height 1.0 --distance 0.5
+5. Wait for READY, then at PX4 pxh> enter commander mode offboard.
+   It still requests the original hover. Once stable, type move and Enter
+   in the ROS - Isaac Forward Step terminal, not the PX4 console.
+6. Watch Isaac move and the [step] measured forward/sideways/height output.
+   REACHED requires measured position within 0.1 m forward and sideways,
+   height within 0.15 m, horizontal/vertical speed within 0.1 m/s, for 1 s.
+7. To interrupt the step, type hold in the movement terminal. It captures
+   current measured X/Y while retaining the same height and heading target.
+   This ends the one-step experiment. For landing use commander land at pxh>.
+   Keep the stream running until landing mode is accepted; then Ctrl+C.
+
+What the program does
+---------------------
+Captures current PX4 local North/East/yaw after native takeoff.
+Forward endpoint = anchor + distance*(cos(yaw), sin(yaw)).
+PX4 uses NED, while Isaac world uses ENU. A read-only preview at the present
+ground pose measured heading about 92.99 degrees and predicted an Isaac
+world delta of approximately X=+0.499 m, Y=-0.026 m. The actual flight run
+captures a new anchor; the preview is not a recorded flight result.
+
+It streams position targets at 10 Hz, Z=-height, yaw fixed, unused
+velocity/acceleration/jerk feedforward fields NaN. A smooth quintic reference
+has zero endpoint velocity/acceleration. Its reference speed and acceleration
+peaks are limited to 0.2 m/s and 0.2 m/s^2 in the delivered simulated IMU
+integration-time counter. A 0.5 m reference takes 4.6875 s on this counter.
+SensorCombined.gyro_integral_dt supplies each simulated measurement period;
+the counter sums received, advancing samples instead of host elapsed time.
+Timestamp offset corrections never contribute an artificial time interval.
+Dropped samples and short clock confirmation make the reference slower.
+Stale pacing data freeze the reference while fresh position can still support
+the fixed-target heartbeat. Missing position still stops all flight output.
+These bound the requested reference, not the actual aircraft's dynamics.
+Requests are limited to 1 m distance and 2 m height for this experiment.
+
+Move requires five seconds of connected target streaming, fresh armed
+Offboard status without failsafe, valid velocity, low speed, requested
+height, and initial X/Y/yaw close to the captured anchor. Move is one-shot;
+repeated commands cannot accumulate travel. It never arms or selects modes.
+Targets are paused for stale/invalid position, real origin reset or another
+target publisher. Clock-offset corrections use the existing hover guard.
+Loss of fresh state or PX4 input readers ends an active step. Leaving armed
+Offboard ends it. Tracking errors over 0.35 m horizontally or 0.25 m in
+height stop the step at current measured X/Y. A callback gap over 0.5 s
+freezes its last reference. Stale state can still invoke PX4's fallback;
+this program cannot promise to hold without valid flight state.
+
+Verification and evidence
+-------------------------
+34 tests passed: 12 hover clock/reset tests and 22 movement tests.
+Movement tests verify heading conversion, reference bounds, no spontaneous
+motion, one-shot command, operator gates, stale state, competing publishers,
+tracking-error handling, actual arrival and PX4 receipt-time commands. Clock
+corrections keep the heartbeat active while pausing trajectory advancement;
+stale data still stop both heartbeat and target. New movement requires
+confirmed progressing timestamps. MOVE refusals list the unmet conditions.
+Tests use in-memory stubs and create no ROS publishers.
+Run tools\check_ros2_step.cmd from the Jazzy/Pixi terminal.
+
+Read-only current heading/direction preview:
+C:\Users\finel\Documents\ChatGPT\issaac\tools\ros2_step.cmd --preview
+
+Runtime output: logs/ros2_step_state.json updates about once per second only
+while targets publish with PX4 readers. Diagnostic changes also save
+logs/ros2_step_status.json. Saved reports must not be treated as heartbeats.
+The first physical step and subsequent live Offboard clock fix are verified
+below. These bounded experiments do not establish arbitrary flight reliability.
+
+2026-10-13 first operator flight result
+-------------------------------------
+The operator observed movement. At 12:56:35 Prague, the step snapshot was
+REACHED: forward=0.5068 m, lateral=0.0133 m, height=1.0006 m. The reference
+completed its 4.6875 s interval. Isaac's physical world position changed
+from approximately X=-3.9726 m before movement to X=-3.4665 m afterward.
+This verifies the movement through the simulated flight-control path.
+
+A subsequent six-second read-only probe received 168 position messages,
+with one backward mapped timestamp. It captured armed Offboard -> Return
+with failsafe -> Offboard, so uninterrupted endpoint hover is not verified.
+The step program subsequently reported HOLD. The timing offset/heartbeat
+interaction requires diagnosis before another movement test; do not infer
+that a completed trajectory means the control connection stayed healthy.
+The operator was instructed to land normally; no landing command was issued
+by the agent. Evidence: logs/first_step_verified.json and px4_first_step.json.
+
+Clock fix after the first movement
+---------------------------------
+An offline snapshot of 10_48_44.ulg shows eight backward Offboard heartbeat
+timestamps, approximately 6.05..7.25 s each. Several align with explicit
+offboard_control_signal_lost flags and Return/failsafe transitions. PX4 local
+position timestamps progress normally, XY/Z remain valid, origin reset
+counters do not change and battery warnings remain clear.
+Analysis: logs/step_clock_analysis.json. The XRCE session reports timesync
+converged=false. Copying a converted position timestamp into a command is
+incorrect when XRCE changes its offset before decoding the returned command.
+
+Commands now send timestamp=0. The installed generated XRCE decoders for
+OffboardControlMode and TrajectorySetpoint explicitly replace zero with PX4
+hrt_absolute_time() on receipt, avoiding the stale-offset round trip.
+An offline C++ harness compiles those exact decoder function bodies (minimal
+buffer/topic stubs, no DDS or flight interface). It reproduces a 7 s stale
+copied timestamp and verifies receipt-time decoding for both command types
+across five positive/negative/zero clock offsets.
+
+Heartbeat timers now use a steady clock. A clock correction retains bounded
+last-good freshness while three progressing samples confirm the new mapping.
+During confirmation the movement reference stays fixed, and its elapsed
+time does not advance. Missing/invalid state, repeated timestamps beyond the
+one-second bound and genuine origin resets still stop output. This is not an
+unconditional heartbeat that conceals a dead sensor/connection.
+
+Live validation procedure (operator launches the publisher)
+----------------------------------------------------------
+Load changed code while landed/disarmed, or while airborne in confirmed
+native Hold at the requested height. Restarting the ROS program while PX4
+depends on it in Offboard would interrupt the control stream. Native Hold
+does not depend on that stream, so landing is not necessary for this reload.
+Keep Isaac playing, PX4 and the XRCE Agent running. Stop any old hover/step
+publisher and run tools\ros2_step.cmd --height 1.0 --distance 0.5 in the
+Jazzy/Pixi terminal. Do not type move or select Offboard during the initial
+60 s communication check. A fixed hover target is published but no arm/mode
+command is sent. Read-only PX4 listeners
+must show progressing, recent OffboardControlMode timestamps in PX4 time
+through XRCE offset corrections. The ground flight record need not show a
+signal-loss flag clearing: commander may only evaluate it when armed.
+After communication passes, takeoff if needed, Offboard and movement are
+operator actions, using the earlier procedure. Final Offboard reliability needs a
+separate recorded run. No live flight processes were restarted by the agent.
+
+If READY does not appear and the diagnostic says another target publisher is
+present, check for a second ros2_step.py or ros2_hover.py process. Two copies
+both pause because neither may compete for flight targets. In native Hold
+or while disarmed, Ctrl+C both old ROS flight programs, then launch only one.
+Leave the PX4 console, XRCE Agent and perception programs running.
+
+Live clock-fix result, 2026-10-13
+-------------------------------
+The operator kept the drone airborne in PX4 native Hold, stopped the duplicate
+old ROS step programs and launched one updated copy. A 60 s wall-time internal
+heartbeat check got 28 progressing samples with maximum age 0.064 s in PX4
+time, including a further mapped-position clock correction. The operator
+selected Offboard. The next heartbeat check passed, maximum age 0.048 s.
+
+The 60 s ROS observer recorded only armed Offboard without failsafe and a
+height near 1 m. Its strict generic one-second status-age criterion failed
+at the final sample (1.484 s old). Position was 0.078 s old. This observer
+warning is retained in the report; it is not proof of control-stream loss.
+
+Direct ULog analysis since PX4 timestamp 18168004000 verifies 1,260 heartbeat
+messages with zero backwards timestamps, maximum gap 0.148 s, and no
+offboard_control_signal_lost, battery or position/altitude-invalid events.
+Recorded flight modes after the fix are armed Hold then armed Offboard, with
+no Return/failsafe transition. The Offboard interval is about 88.7 s of PX4
+simulation time. Local origin reset counters remain 3/2/1 and position valid.
+XRCE's estimated offset changes during that interval; command timestamps
+remain stable because PX4 stamps their receipt directly.
+
+Evidence: logs/clock_fix_flight_analysis.json, receipt_heartbeat_check.json,
+receipt_heartbeat_native_hold.json, px4_clock_fix_offboard.json.
+At the end of that check, the movement was unused. The subsequent operator
+attempt exposed the trajectory pacing issue described below.
+
+Slow simulation movement correction, 2026-10-13
+---------------------------------------------
+The next step stopped at the horizontal tracking limit: recorded target
+forward 0.390 m, actual forward 0.036 m, tracking error about 0.354 m.
+Heartbeat timestamps stayed monotonic, offboard_control_signal_lost stayed
+zero, and a direct commander check confirmed armed Offboard without failsafe.
+The old reference had advanced 3.093 seconds of computer time while the
+recorded ramp occupied only about 1.2 seconds of PX4 physics time. A separate
+subscription-only probe received 599 simulated IMU packets in 7.891 wall
+seconds, representing 2.392 seconds of integrated sensor time (ratio 0.303).
+The host-time trajectory was outrunning the simulated aircraft.
+
+The new source keeps the steady wall-clock heartbeat but advances movement
+using the delivered IMU integration periods described above. The 0.35 m
+tracking-error limit remains unchanged. At the measured simulation speed,
+expect the reference to take roughly 15-20 real seconds, then allow the
+aircraft to settle. The console now prints elapsed/total simulated reference
+seconds. A wall callback stall still ends the step; stale or invalid position,
+origin resets, duplicate target publishers and flight-state gates remain.
+Eight added tests cover slow physics, lost/duplicate sensor periods, invalid
+durations, offset changes, pacing availability and independent wall stalls.
+All 34 tests pass without creating flight publishers. The sensor stream is
+verified read-only; flight with this source change still needs an operator run.
+
+The running old publisher holds its abort position and does not reload files.
+For another attempt while airborne: at pxh> select commander mode auto:loiter
+(native Hold), confirm that mode, then Ctrl+C the ROS step program and launch
+exactly one updated copy with the same --height 1.0 --distance 0.5 options.
+Wait for READY before selecting commander mode offboard; after hover settles,
+type move and Enter in the ROS step terminal. No landing is needed for this
+handover. The one-step limit remains; its restart message now explains Hold.
+Evidence: logs/step_tracking_analysis.json and logs/sensor_pacing_probe.json.
+
+Operator pacing-fix flight result, 2026-10-13
+------------------------------------------
+The operator reloaded one updated publisher while PX4 held natively, then
+selected Offboard and requested move. REACHED was reported at 16:46:41 Prague:
+forward about 0.54 m, lateral 0.01 m, within the configured arrival gates.
+A subsequent fresh snapshot measured forward 0.5028 m, lateral 0.0151 m,
+height 0.9990 m; simulated reference elapsed reached 4.6875 s. The pacer was
+fresh and one mapped-position clock correction had recovered without a fault.
+Direct PX4 checks confirmed armed Offboard, no current failsafe and no current
+offboard signal loss. This verifies arrival and endpoint hover for this run,
+not every intermediate heartbeat or broader flight reliability. The LiDAR
+decision remains independent of movement. Evidence: logs/paced_step_verified.json.
+
+References
+https://docs.px4.io/main/en/ros2/offboard_control
+https://docs.px4.io/main/en/flight_modes/offboard
