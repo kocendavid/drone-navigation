@@ -186,6 +186,15 @@ class MappingTests(unittest.TestCase):
 
 
 class PlanningTests(unittest.TestCase):
+    def test_mapped_return_uses_shortcut_instead_of_retracing_exploration(self):
+        snap = snapshot(True)
+        travel = [[-3, 0], [-3, 5], [3, 5], [3, 0]]
+        route = plan(snap, travel[-1], travel[0])
+        length = sum(math.dist(a, b) for a, b in zip(route, route[1:]))
+        self.assertLess(length, sum(math.dist(a, b) for a, b in zip(travel, travel[1:])))
+        self.assertEqual(route[-1], travel[0])
+        self.assertGreater(max(abs(p[1]) for p in route), 1.5)
+
     def test_frontier_distance_counts_the_detour_in_known_space(self):
         snap = snapshot(True)
         distances = route_distances(snap, [-3.0, 0.0])
@@ -422,6 +431,8 @@ def navigator_fixture():
     node.follower = RouteFollower()
     node.follower.begin([[2.0, 3.0], [2.0, 2.0]])
     node.target_goal = np.array([2.0, 2.0])
+    node.home_world_xy = None
+    node.returning_home = False
     node.pacer_mark = 100.0
     node.last_callback = 99.9
     node.last_retry = 100.0
@@ -478,6 +489,109 @@ def navigator_fixture():
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_home_request_during_motion_brakes_and_cancels_exploration_mission(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        node.home_world_xy = np.array([1.0, 2.0])
+        node.position.vx = 0.4
+        node.exploration.start(snap)
+        node.mission.start()
+        previous_generation = node.plan_generation
+        node.commands.put(dict(action="home", request_id="return"))
+        node.commands_tick(100.0, snap, True)
+        self.assertEqual(node.follower.phase, "PLANNING")
+        np.testing.assert_allclose(node.follower.target, node.world_pose)
+        np.testing.assert_allclose(node.target_goal, [1, 2])
+        self.assertTrue(node.returning_home)
+        self.assertFalse(node.exploration.enabled)
+        self.assertFalse(node.mission.enabled)
+        self.assertIsNone(node.plan_thread)
+        self.assertGreater(node.plan_generation, previous_generation)
+        node.commands.put(dict(action="hold"))
+        node.commands_tick(100.0, snap, True)
+        self.assertFalse(node.returning_home)
+        self.assertIsNone(node.target_goal)
+        np.testing.assert_allclose(node.home_world_xy, [1, 2])
+
+    def test_home_requires_saved_home_fresh_map_and_navigation_height(self):
+        for captured, fresh, height in ((False, True, -1), (True, False, -1), (True, True, -2)):
+            node, _, _, _ = navigator_fixture()
+            if captured:
+                node.home_world_xy = np.array([1.0, 2.0])
+            node.position.z = height
+            replies = []
+            node.dashboard.acknowledge_command = lambda req, status, reason: replies.append(status)
+            node.commands.put(dict(action="home", request_id="return"))
+            node.commands_tick(100.0, node.feed.get()[0], fresh)
+            self.assertEqual(replies, ["rejected"])
+            self.assertFalse(node.returning_home)
+
+    def test_return_waits_for_stability_then_plans_to_home_and_blocks_unknown_route(self):
+        for unreachable in (False, True):
+            node, _, _, _ = navigator_fixture()
+            snap = node.feed.get()[0]
+            node.home_world_xy = np.array([-3.0, 3.0])
+            if unreachable:
+                snap.model.grid[:, 60] = UNKNOWN
+                snap.clearance, snap.body_free, snap.safe = snap.model.geometry()
+            node.position.vx = 0.3
+            node.commands.put(dict(action="home", request_id="return"))
+            with patch("ros2_navigate.time.monotonic", return_value=100.0):
+                GoalNavigator.publish_target(node)
+                self.assertIsNone(node.plan_thread)
+                node.position.vx = 0
+                GoalNavigator.publish_target(node)
+                node.plan_thread.join(5)
+                self.assertFalse(node.plan_thread.is_alive())
+                GoalNavigator.publish_target(node)
+            self.assertEqual(node.follower.phase, "BLOCKED" if unreachable else "NAVIGATING")
+            self.assertEqual(node.mission.phase, "IDLE")
+            if not unreachable:
+                np.testing.assert_allclose(node.follower.path[-1], node.home_world_xy)
+
+    def test_home_refuses_invalid_velocity_and_manual_goal_replaces_return_intent(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        node.home_world_xy = np.array([1.0, 2.0])
+        node.position.v_xy_valid = False
+        replies = []
+        node.dashboard.acknowledge_command = lambda req, status, reason: replies.append(status)
+        node.commands.put(dict(action="home", request_id="invalid"))
+        node.commands_tick(100.0, snap, True)
+        self.assertEqual(replies, ["rejected"])
+        node.position.v_xy_valid = True
+        node.commands.put(dict(action="home", point=[999, 999], request_id="return"))
+        node.commands_tick(100.0, snap, True)
+        np.testing.assert_allclose(node.target_goal, node.home_world_xy)
+        node.commands.put(dict(action="goal", point=[2.0, 2.0], request_id="manual"))
+        node.commands_tick(100.0, snap, True)
+        node.plan_thread.join(5)
+        self.assertFalse(node.returning_home)
+        np.testing.assert_allclose(node.target_goal, [2, 2])
+        np.testing.assert_allclose(node.home_world_xy, [1, 2])
+
+    def test_home_arrival_confirms_settling_and_finishes_hover_without_land(self):
+        node, _, _, _ = navigator_fixture()
+        node.home_world_xy = node.world_pose.copy()
+        node.target_goal = node.home_world_xy.copy()
+        node.returning_home = True
+        node.active_ui_command = dict(action="home", request_id="return")
+        node.follower.hold(node.world_pose, "Settling home", "SETTLING")
+        land_commands = []
+        node.land_pub.publish = land_commands.append
+        replies = []
+        node.dashboard.acknowledge_command = lambda req, status, reason: replies.append(status)
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            GoalNavigator.publish_target(node)
+            self.assertEqual(node.follower.phase, "SETTLING")
+            node.pacer.total_s += 1.0
+            GoalNavigator.publish_target(node)
+        self.assertEqual(node.follower.phase, "REACHED")
+        self.assertIn("Home reached", node.follower.reason)
+        node.update_command_progress()
+        self.assertEqual(replies, ["completed"])
+        self.assertEqual(land_commands, [])
+
     def test_yaw_changes_with_route_without_changing_position_reference(self):
         node, modes, targets, _ = navigator_fixture()
         node.pacer.total_s += 0.1
@@ -600,6 +714,12 @@ class RuntimeTests(unittest.TestCase):
                 if i < 2:
                     self.assertIsNone(node.alignment)
         self.assertIsNotNone(node.alignment)
+        np.testing.assert_allclose(node.home_world_xy, snap.pose[:2])
+        saved_home = node.home_world_xy.copy()
+        snap.pose[0] += 2
+        node.capture_alignment(snap, True)
+        np.testing.assert_allclose(node.home_world_xy, saved_home)
+        self.assertIsNone(navigator_fixture()[0].home_world_xy)
 
     def test_brief_takeoff_pause_does_not_lock_in_an_alignment(self):
         node, _, _, _ = navigator_fixture()

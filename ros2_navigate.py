@@ -64,6 +64,8 @@ class GoalNavigator(HoverPublisher):
         self.last_retry = 0.0
         self.last_map_scans = None
         self.target_goal = None
+        self.home_world_xy = None
+        self.returning_home = False
         self.plan_thread = None
         self.plan_results = Queue()
         self.plan_generation = 0
@@ -212,6 +214,16 @@ class GoalNavigator(HoverPublisher):
         self.alignment = FrameAlignment(snap.pose[:2], snap.pose[2], [p.x, p.y], p.heading)
         self.world_pose = self.alignment.world([p.x, p.y])
         self.follower.hold(self.world_pose)
+        if self.home_world_xy is None:
+            self.home_world_xy = self.world_pose.copy()
+            history = getattr(self.dashboard, "history", None)
+            if history:
+                history.event(
+                    "home_captured",
+                    "First stable aligned hover saved as home",
+                    xy=self.home_world_xy.tolist(),
+                    simulation_s=self.pacer.total_s,
+                )
         self.say("World/PX4 alignment captured after steady hover and fresh scans.")
 
     def retire_obsolete_goal(self, error):
@@ -261,6 +273,7 @@ class GoalNavigator(HoverPublisher):
         self.settled_since = None
         if clear_goal:
             self.target_goal = None
+            self.returning_home = False
             self.exploration.cancel(reason)
             if self.mission.enabled:
                 self.mission.cancel(reason)
@@ -602,6 +615,13 @@ class GoalNavigator(HoverPublisher):
                 self.stop("Operator hold", "HOLD", True)
                 self.command_feedback(item, "accepted", "Hold accepted; waiting for stable hover")
                 continue
+            if action == "home" and self.home_world_xy is None:
+                self.command_feedback(
+                    item,
+                    "rejected",
+                    "Home is not captured yet; establish the first stable mapped hover",
+                )
+                continue
             if not (
                 self.ready_samples >= 50
                 and self.flight_active(now)
@@ -609,7 +629,19 @@ class GoalNavigator(HoverPublisher):
                 and self.alignment is not None
                 and self.state.motion_ready(now)
                 and self.pacer.fresh(now)
-                and self.stable()
+                and (
+                    self.stable()
+                    or (
+                        action == "home"
+                        and abs(self.position.z + 1.0) <= 0.15
+                        and self.position.v_xy_valid
+                        and self.position.v_z_valid
+                        and all(
+                            math.isfinite(v)
+                            for v in (self.position.vx, self.position.vy, self.position.vz)
+                        )
+                    )
+                )
             ):
                 self.dashboard.note = self.flight_readiness(now, map_ready)["next_step"]
                 self.command_feedback(item, "rejected", self.dashboard.note)
@@ -629,7 +661,18 @@ class GoalNavigator(HoverPublisher):
             )
             self.active_ui_command = item
             self.command_feedback(item, "accepted", "Accepted; preparing " + action)
-            if action == "goal":
+            if action == "home":
+                self.exploration.cancel("optimizedRoutePlanner: return home selected")
+                if self.mission.enabled:
+                    self.mission.cancel("Return home replaces automatic exploration and landing")
+                self.returning_home = True
+                self.target_goal = self.home_world_xy.copy()
+                self.stop(
+                    "optimizedRoutePlanner: braking to hover before planning home", "PLANNING"
+                )
+                # The control loop launches the planner after measured motion settles.
+            elif action == "goal":
+                self.returning_home = False
                 self.exploration.cancel("Manual destination selected")
                 if self.mission.enabled:
                     self.mission.cancel("Manual destination selected")
@@ -637,6 +680,7 @@ class GoalNavigator(HoverPublisher):
                 self.stop("Goal selected", "PLANNING")
                 self.launch_plan(snap)
             elif action in ("explore", "mission"):
+                self.returning_home = False
                 if action == "mission":
                     self.mission.start()
                     self.last_completion_stamp = None
@@ -679,7 +723,7 @@ class GoalNavigator(HoverPublisher):
             terminal = self.mission.phase == "LANDED"
         elif phase in ("PAUSED", "BLOCKED"):
             status = phase.lower()
-        elif phase == "REACHED" and item["action"] in ("goal", "resume"):
+        elif phase == "REACHED" and item["action"] in ("goal", "resume", "home"):
             status, terminal = "completed", True
         elif item["action"] == "hold" and self.stable():
             status, reason, terminal = "completed", "Stable hover confirmed", True
@@ -920,7 +964,11 @@ class GoalNavigator(HoverPublisher):
                     and self.pacer.total_s - self.settled_since >= 1.0
                 ):
                     self.follower.phase = "REACHED"
-                    self.follower.reason = "Destination reached. Choose another goal."
+                    self.follower.reason = (
+                        "Home reached; holding 1 m hover. Land here remains an explicit choice."
+                        if self.returning_home
+                        else "Destination reached. Choose another goal."
+                    )
                     if self.exploration.enabled:
                         self.exploration.arrived(snap, self.target_goal)
                         self.follower.reason = (
@@ -1007,6 +1055,9 @@ class GoalNavigator(HoverPublisher):
             trail=self.exploration.trail[-1000:],
             visited_viewpoints=self.exploration.visited,
             goal=self.target_goal.tolist() if self.target_goal is not None else None,
+            route_planner="optimizedRoutePlanner",
+            home_xy=self.home_world_xy.tolist() if self.home_world_xy is not None else None,
+            returning_home=self.returning_home,
             remaining_m=(
                 float(np.linalg.norm(self.world_pose - self.target_goal))
                 if self.world_pose is not None and self.target_goal is not None

@@ -381,8 +381,13 @@
               ><button id="mission" disabled>Explore and land here</button
               ><button id="hold" disabled>Hold here / stop exploring</button
               ><button id="resume" disabled>Resume goal</button>
+              <button id="home" disabled>Return home</button>
               <button id="restart" disabled>Restart experiment</button>
             </div>
+            <p id="home-status" class="help">
+              optimizedRoutePlanner: home is captured at the first stable mapped hover. Return home
+              finishes hovering.
+            </p>
             <p id="reset-status" class="help">
               Restart restores the starting pose, clears the map and history, and leaves the drone
               disarmed on the ground. Your maze edits are preserved.
@@ -875,6 +880,15 @@
           }
         route(view.preview, true);
         route(view.path, false);
+        if (view.home_xy) {
+          const a = screen(view.home_xy);
+          ctx.fillStyle = "#ffd579";
+          ctx.fillText("H", a[0], a[1] - 15);
+          ctx.strokeStyle = "#ffd579";
+          ctx.beginPath();
+          ctx.arc(...a, 7, 0, Math.PI * 2);
+          ctx.stroke();
+        }
         for (const tip of view.exploration?.wall_endings_xy || []) {
           const a = screen(tip);
           ctx.strokeStyle = "#f3be6f";
@@ -1014,6 +1028,18 @@
           !!replayFrame ||
           replaySource === "previous";
         byId("hold").disabled = !state.control_enabled || resetting();
+        byId("home").disabled =
+          byId("go").disabled || !state.home_xy || state.route_planner !== "optimizedRoutePlanner";
+        byId("home-status").textContent = state.home_xy
+          ? "optimizedRoutePlanner · Home H: " +
+            state.home_xy.map((v) => v.toFixed(2)).join(", ") +
+            " m · " +
+            (state.returning_home
+              ? "Returning / holding at home."
+              : "Return through known clear space; finish in hover.")
+          : state.route_planner === "optimizedRoutePlanner"
+            ? "Home not captured yet: waiting for the first stable mapped hover."
+            : "Return home requires reloading the updated navigator; the current run is unchanged.";
         byId("explore").disabled =
           !state.control_enabled ||
           flightBusy ||
@@ -1127,6 +1153,7 @@
         "restart",
         "hold",
         "resume",
+        "home",
         "explore",
         "mission",
         "takeoff",
@@ -1170,6 +1197,7 @@
           byId("go").disabled = true;
           byId("hold").disabled = true;
           byId("resume").disabled = true;
+          byId("home").disabled = true;
           byId("explore").disabled = true;
           byId("mission").disabled = true;
           byId("restart").disabled = true;

@@ -14,6 +14,8 @@ See [current maze setup](docs/MAZE_SETUP.txt) for the detailed procedure.
 
 ## Contents
 
+- [Corner-aware exploration](#corner-aware-exploration)
+- [optimizedRoutePlanner: return home](#optimizedrouteplanner-return-home)
 - [Control the lab through code](#control-the-lab-through-code)
 - [Explore, map and land](#explore-map-and-land)
 - [What the student is building](#what-the-student-is-building)
@@ -55,6 +57,34 @@ This is a first geometric heuristic: short/thick walls, noisy geometry or
 unconfirmed endings can be missed, and two-room behavior needs a live run.
 It does not classify rooms or guarantee complete coverage. The independent
 enclosure/completion checks remain responsible for declaring exploration done.
+
+## optimizedRoutePlanner: return home
+
+**Return home** saves and returns to the first stable, aligned 1 m hover point
+in the current experiment. The map marks that point **H**. It is captured once;
+later goals, exploration sessions and Hold do not move it. Restart experiment
+or restarting the navigator clears it along with the map. It is not a persistent
+GPS home or an automatic landing command.
+
+The button can interrupt exploration during flight. The controller cancels
+exploration and its automatic landing mission, commands a hover, waits for
+measured motion to settle, then plans a fresh route through currently observed
+clear space. It uses A* with no diagonal corner cutting, then removes redundant
+waypoints only where a straight segment preserves the obstacle margin. The
+usual speed/braking limits, smooth yaw and live map/LiDAR checks remain active.
+If no safe mapped route exists, it holds as BLOCKED; it never invents a passage
+or reports a successful return. Home arrival requires the measured position to
+remain within 0.15 m at a stable hover for one simulated second. Use **Land here**
+separately if you want to land.
+
+Because the return planner uses the accumulated map rather than replaying the
+outbound travel history, it can skip exploration detours and use known
+shortcuts between connected rooms. A* minimizes grid distance; shortcutting
+reduces unnecessary bends. This is not a guarantee of the mathematically
+shortest continuous route or fastest flight: clearance, turns, acceleration and
+new obstacles still affect the result. Unknown space remains excluded even if
+it would make a shorter path. Home capture, its selected goal, route changes,
+interruptions and arrival are included in decision history/map frames.
 
 ## Control the lab through code
 

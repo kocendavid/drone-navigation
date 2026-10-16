@@ -209,6 +209,7 @@ class Dashboard:
                             return
                         if action not in (
                             "goal",
+                            "home",
                             "hold",
                             "resume",
                             "explore",

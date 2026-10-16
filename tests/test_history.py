@@ -224,6 +224,21 @@ class HistoryTests(unittest.TestCase):
         finally:
             hub.close()
 
+    def test_return_home_http_is_queued_once_without_a_client_supplied_destination(self):
+        hub = Dashboard(SimpleNamespace(get=lambda: (None, None)), Queue(), port=0)
+        try:
+            for _ in range(2):
+                req = Request(
+                    hub.url + "/api/command",
+                    json.dumps(dict(action="home", request_id="return-home")).encode(),
+                    headers={"Content-Type": "application/json", "X-Navigation-Token": hub.token},
+                )
+                self.assertEqual(json.load(urlopen(req))["command"]["status"], "queued")
+            self.assertEqual(hub.commands.qsize(), 1)
+            self.assertEqual(hub.commands.get_nowait()["action"], "home")
+        finally:
+            hub.close()
+
     def test_frame_and_complete_download_are_read_only_and_previous_run_survives(self):
         with tempfile.TemporaryDirectory() as folder:
             history = RunHistory(Path(folder) / "decisions.jsonl")

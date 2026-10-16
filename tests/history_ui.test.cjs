@@ -381,7 +381,53 @@ function dashboard() {
     assert(d.drawn.includes("Look around"));
     assert.match(d.element("corner-status").textContent, /not a flight destination/);
   }
-  console.log("13 dashboard interaction checks passed");
+  {
+    const d = dashboard();
+    assert.equal(d.element("home").disabled, true);
+    d.state.route_planner = "optimizedRoutePlanner";
+    d.state.home_xy = [0.5, -0.75];
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("home").disabled, false);
+    assert.match(d.element("home-status").textContent, /0.50, -0.75/);
+    assert(d.drawn.includes("H"));
+    let request;
+    d.sandbox.fetch = async (url, args) => {
+      request = JSON.parse(args.body);
+      return {
+        ok: true,
+        json: async () => ({
+          command: {
+            id: request.request_id,
+            action: request.action,
+            status: "queued",
+            reason: "Waiting",
+          },
+        }),
+      };
+    };
+    await d.element("home").onclick();
+    assert.equal(request.action, "home");
+    assert.equal(request.point, null, "home request carries no destination; controller owns home");
+    assert.match(d.element("action-status").textContent, /home.*queued/);
+    d.state.experiment_reset.busy = true;
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("home").disabled, true);
+  }
+  {
+    const d = dashboard();
+    d.state.route_planner = "optimizedRoutePlanner";
+    d.state.home_xy = [0.5, -0.75];
+    d.sandbox.api.setState(d.state);
+    d.sandbox.fetch = async () => ({
+      ok: true,
+      json: async () => ({ ...d.state, id: 7, home_xy: [-0.5, 0.75] }),
+    });
+    await d.sandbox.api.reviewFrame(7);
+    assert.equal(d.element("home").disabled, true, "history review must not dispatch a return");
+    assert.deepEqual(d.state.home_xy, [0.5, -0.75]);
+    assert.deepEqual(Array.from(d.sandbox.api.replay().home_xy), [-0.5, 0.75]);
+  }
+  console.log("15 dashboard interaction checks passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
