@@ -13,20 +13,33 @@ class NavigationSettings:
     stop_distance_m: float = 0.65
     minimum_approach_m_s: float = 0.08
     acceleration_m_s2: float = 0.25
+    braking_reaction_s: float = 0.5
     turn_speed_m_s: float = 0.15
+    yaw_rate_deg_s: float = 45.0
+    yaw_acceleration_deg_s2: float = 90.0
     target_lead_m: float = 0.28
     body_radius_m: float = 0.3
     obstacle_margin_m: float = 0.8
     near_range_m: float = 0.5
     exploration_max_goals: int = 20
+    exploration_replan_interval_s: float = 2.0
+    floor_z_m: float = -0.76965
+    map_resolution_m: float = 0.1
+    map_width_cells: int = 120
+    map_height_cells: int = 120
+    map_origin_x_m: float = -6.0
+    map_origin_y_m: float = -6.0
 
     def validate(self):
         values = asdict(self)
         if any(
-            isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) or v <= 0
-            for v in values.values()
+            isinstance(v, bool)
+            or not isinstance(v, (float, int))
+            or not math.isfinite(v)
+            or (v <= 0 and name not in ("floor_z_m", "map_origin_x_m", "map_origin_y_m"))
+            for name, v in values.items()
         ):
-            raise ValueError("Navigation settings must be finite positive numbers")
+            raise ValueError("Settings must be finite numbers, with positive speeds and dimensions")
         if (
             not 0.1 <= self.near_range_m <= 1.0
             or not self.near_range_m + 0.1 <= self.stop_distance_m < self.slow_distance_m
@@ -48,12 +61,35 @@ class NavigationSettings:
             raise ValueError(
                 "Target lead must be at most 0.30 m; reference acceleration at most 0.5 m/s^2"
             )
+        if self.yaw_rate_deg_s > 90 or self.yaw_acceleration_deg_s2 > 180:
+            raise ValueError("Yaw is limited to 90 deg/s and 180 deg/s² acceleration")
+        if self.braking_reaction_s > 2.0:
+            raise ValueError("Braking reaction allowance must be at most two simulated seconds")
         if (
             type(self.exploration_max_goals) is not int
             or not 1 <= self.exploration_max_goals <= 100
         ):
             raise ValueError("Exploration goal limit must be an integer from 1 to 100")
+        if not 0.05 <= self.map_resolution_m <= 0.25:
+            raise ValueError("Map resolution must be between 0.05 and 0.25 m")
+        if (
+            any(
+                type(value) is not int or not 16 <= value <= 1024
+                for value in (self.map_width_cells, self.map_height_cells)
+            )
+            or self.map_width_cells * self.map_height_cells > 65536
+        ):
+            raise ValueError("Map dimensions must be integers with at most 65,536 total cells")
         return self
+
+    def map_options(self):
+        return dict(
+            resolution=self.map_resolution_m,
+            size=(self.map_height_cells, self.map_width_cells),
+            origin=(self.map_origin_x_m, self.map_origin_y_m),
+            body_radius=self.body_radius_m,
+            clearance=self.obstacle_margin_m,
+        )
 
 
 def load_settings(path=None):

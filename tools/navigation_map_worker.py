@@ -18,8 +18,16 @@ from navigation.mapping import RayMap
 
 
 class MapWorker(ForwardClearance):
+    @staticmethod
+    def make_map(args):
+        return RayMap(
+            resolution=args.map_resolution,
+            size=(args.map_height, args.map_width),
+            origin=(args.map_origin_x, args.map_origin_y),
+        )
+
     def __init__(self, args):
-        self.map = RayMap()
+        self.map = self.make_map(args)
         self.good = None
         self.map_error = "Waiting for cloud and transforms"
         self.last_emit = 0.0
@@ -29,7 +37,7 @@ class MapWorker(ForwardClearance):
         reset = self.clock_ns is not None and stamp_ns(msg.clock) < self.clock_ns
         super().on_clock(msg)
         if reset:
-            self.map = RayMap()
+            self.map = self.make_map(self.args)
             self.good = None
             self.map_error = "Simulation clock reset; map cleared"
 
@@ -70,7 +78,7 @@ class MapWorker(ForwardClearance):
             body_r = wr @ br.T
             body_t = wt - body_r @ bt
             if not self.map.inside(self.map.cell(body_t[:2])):
-                raise ValueError("Vehicle outside the 12 m map")
+                raise ValueError("Vehicle outside configured map bounds")
             # Reject a changed floor/flight-height relationship rather than map
             # an unintended altitude band as navigable space.
             if abs(body_t[2] - (self.args.floor_z + 1.0)) > 0.2:
@@ -123,8 +131,12 @@ class MapWorker(ForwardClearance):
             ),
             resolution=self.map.resolution,
             origin=self.map.origin.tolist(),
-            size=self.map.grid.shape[0],
+            size=self.map.grid.shape[1],
+            width=self.map.grid.shape[1],
+            height=self.map.grid.shape[0],
             grid="".join(np.array(["?", ".", "#", "b"])[self.map.grid.ravel()].tolist()),
+            confirmed_walls="".join(np.where(self.map.confirmed_walls.ravel(), "1", "0").tolist()),
+            wall_policy=self.map.wall_policy(),
             pose=good["pose"] if good else None,
             hits=np.round(good["hits"], 4).tolist() if good else [],
             near_range_m=self.args.near_range,
@@ -137,9 +149,22 @@ def main():
     parser.add_argument("--stream-session", required=True)
     parser.add_argument("--floor-z", type=float, default=-0.76965)
     parser.add_argument("--near-range", type=float, default=0.5)
+    parser.add_argument("--map-resolution", type=float, default=0.1)
+    parser.add_argument("--map-width", type=int, default=120)
+    parser.add_argument("--map-height", type=int, default=120)
+    parser.add_argument("--map-origin-x", type=float, default=-6.0)
+    parser.add_argument("--map-origin-y", type=float, default=-6.0)
     args = parser.parse_args()
     if not math.isfinite(args.floor_z) or not 0.1 <= args.near_range <= 1.0:
         parser.error("Invalid floor/near range")
+    if (
+        not 0.05 <= args.map_resolution <= 0.25
+        or not 16 <= args.map_width <= 1024
+        or not 16 <= args.map_height <= 1024
+        or args.map_width * args.map_height > 65536
+        or not all(math.isfinite(v) for v in (args.map_origin_x, args.map_origin_y))
+    ):
+        parser.error("Invalid map geometry")
     args.topic = "/lidar/points"
     args.sensor_frame = "point_cloud"
     args.output = None

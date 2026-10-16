@@ -1,0 +1,82 @@
+CURRENT MAZE PREPARATION AND EXPLORATION
+=======================================
+2026-10-14, Europe/Prague. Project paths below are relative to the repository root.
+
+Continuation: preparation confirmed 11 colliders and an upright initial chassis.
+Direct code control now works through tools/enable_lab_control.py and
+tools/isaac_client.py; desktop automation is unnecessary. Live inspection then
+found two unlocked folding-arm hinges and an upside-down vehicle. The agent
+locked all four arm hinges with a scene-layer backup, restarted Isaac/PX4 and
+verified upright settling, fresh bridge traffic and PX4 Preflight check: OK.
+These scene edits remain in the open stage until saved. Maze flight is pending.
+See README.md for the current control workflow and script effects.
+
+Scene inspection
+----------------
+The operator's saved scene at C:\Users\finel\Desktop\scene.usd contains a maze
+roughly 58 by 18 m, translated south of the previous room. Floor world Z is
+-3.9803731091662193. Drone root XY is approximately (-28.10,-17.16).
+The maze meshes had no authored CollisionAPI and the old simple_room remained
+active. A live TF probe showed the chassis upside down at the earlier room's
+floor height, while the motor bridge log stopped updating. PX4 still reported
+the old armed Offboard state and simulator_mavlink emitted a poll timeout.
+That stale mode was not evidence of a connected or airborne maze vehicle.
+
+Prepared changes
+----------------
+config/navigation_settings.json now selects:
+  grid: 320 columns x 120 rows, resolution 0.2 m (64 x 24 m total)
+  origin: (-34,-27), bounds x=[-34,30), y=[-27,-3)
+  floor Z: -3.9803731091662193
+  cruise: up to 0.5 m/s; slow below 1 m; stop/replan at 0.65 m
+  LiDAR near range: 0.5 m; wall margin: 0.8 m
+The mapper, pipe validation and browser support rectangular translated grids.
+Large grids are bounded to 65,536 cells to keep the live pipe and calculation
+manageable. The measured geometry calculation for this map took about 0.27 s.
+The mapper retains its 12 m valid-return processing range and fixed-height
+slab; a 64 m map does not mean all 64 m are visible in one scan.
+
+Frame checks compare a map pose with the closest trusted PX4 position sample
+at cloud receipt on this host, instead of comparing an older scan with the
+current moving vehicle. The allowed receipt-time difference is 0.25 s; the
+position/yaw disagreement limits remain 0.2 m / 15 degrees. This compensates
+for map computation delay, not arbitrary localization error or an origin reset.
+
+Operator scene preparation
+--------------------------
+1. Stop Isaac. Stop ROS - Isaac Goal Navigator with Ctrl+C.
+2. Shut down the old PX4 - Isaac SITL instance at its pxh> prompt:
+   shutdown
+   This is PX4's command, not Windows shutdown.exe. If that console does not
+   respond, the explicit PX4 client command from a Windows terminal is:
+   wsl -d Ubuntu --exec /home/finel/PX4-Autopilot/build/px4_sitl_default/bin/px4-shutdown --instance 0
+   Keep the XRCE agent, Zenoh router and LiDAR mount TF running.
+3. With the maze open and Isaac STOPPED, run in its Script Editor:
+   import runpy
+   runpy.run_path('C:/Users/finel/Documents/ChatGPT/issaac/tools/prepare_maze_scene.py')
+   The script backs up the root layer under logs/, enables static collisions
+   for maze geometry, and deactivates /World/simple_room. It does not reposition
+   the drone, select a mode, start the timeline or save the scene automatically.
+   It prints the chassis position and whether it is upright. A false upright
+   result needs an operator placement correction before proceeding.
+   The changed collision model follows NVIDIA's static-mesh API:
+   https://docs.omniverse.nvidia.com/kit/docs/omni_physics/107.3/dev_guide/rigid_bodies_articulations/collision.html
+4. Save the prepared scene separately if desired. Restart PX4 - Isaac SITL,
+   then run load_bridge.py in Isaac while stopped and press Play, following
+   docs/BRIDGE_SETUP.txt. Wait for fresh motor/sensor traffic and valid state.
+   Native 1 m takeoff and the subsequent Offboard handover remain operator actions.
+5. Start one tools/ros2_navigate.cmd after establishing the native hover.
+   Reload http://127.0.0.1:8787/. Wait for READY and a fresh map, select Offboard,
+   verify status, and click Explore unseen space. Hold here cancels exploration.
+
+Verification status
+-------------------
+126 tests pass, including translated rectangular ray mapping, strict pipe
+geometry, closure/stale-data behavior and time-matched frame checks. Lint and
+JavaScript syntax pass. The scene-preparation script was exercised on an
+isolated USD fixture; the user's scene has not been changed by the agent.
+The browser preview used synthetic horizontal rays against saved maze walls;
+it is labelled OFFLINE PREVIEW, rejects flight commands, and is not a live result.
+Screenshot: logs/maze_map_offline_preview.png.
+Preparation and a fresh bridge/PX4 restart are now verified as described above.
+Autonomous maze flight remains pending. These changes follow initial commit e98ad78.

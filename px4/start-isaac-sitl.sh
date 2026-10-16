@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+px4_console_args=()
+if [[ "${1:-}" == '--daemon' ]]; then
+    px4_console_args=(-d)
+elif [[ $# -ne 0 ]]; then
+    echo 'Usage: start-isaac-sitl.sh [--daemon]' >&2
+    exit 2
+fi
 # Keep Windows/Conda Python settings out of the Linux startup helpers.
 unset PYTHONHOME PYTHONPATH CONDA_PREFIX CONDA_DEFAULT_ENV
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -51,4 +58,4 @@ export PX4_PARAM_CA_ROTOR2_PX=0.10253 PX4_PARAM_CA_ROTOR2_PY=-0.10253 PX4_PARAM_
 export PX4_PARAM_CA_ROTOR3_PX=-0.10253 PX4_PARAM_CA_ROTOR3_PY=0.10253 PX4_PARAM_CA_ROTOR3_KM=-0.05
 cd "$runtime_dir/rootfs"
 echo "Isaac PX4 SITL: waiting for Isaac sensor data on WSL UDP 14560; DDS agent $windows_host:8888."
-exec "$px4_binary" -s "$runtime_dir/rcS-isaac"
+exec "$px4_binary" "${px4_console_args[@]}" -s "$runtime_dir/rcS-isaac"

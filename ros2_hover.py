@@ -108,7 +108,12 @@ class HoverState:
 
 class HoverPublisher(Node):
     def __init__(
-        self, height, *, node_name="isaac_hover_target", status_filename="ros2_hover_status.json"
+        self,
+        height,
+        *,
+        node_name="isaac_hover_target",
+        status_filename="ros2_hover_status.json",
+        mode_notice="This script never arms or changes mode.",
     ):
         super().__init__(node_name)
         self.height = height
@@ -133,7 +138,7 @@ class HoverPublisher(Node):
         self.timer = self.create_timer(
             0.1, self.publish_target, clock=Clock(clock_type=ClockType.STEADY_TIME)
         )
-        self.say("Waiting for valid PX4 position. This script never arms or changes mode.")
+        self.say("Waiting for valid PX4 position. " + mode_notice)
 
     def say(self, message):
         if message != self.notice:

@@ -6,14 +6,31 @@ import numpy as np
 UNKNOWN, FREE, OCCUPIED, START_AREA = 0, 1, 2, 3
 
 
-def distance_field(blocked, resolution):
+def distance_field(blocked, resolution, *, vectorized=True):
     """Exact Euclidean distance to blocked cell centres; exterior is blocked.
 
-    Separable lower-envelope squared distance transform, avoiding a SciPy
-    dependency. Subtract a half cell diagonal to bound distance to cell area.
+    Separable squared distance transform, avoiding a SciPy dependency. Chunked
+    NumPy minima release the GIL on larger maps. Subtract a half cell diagonal
+    to bound distance to cell area.
     """
     mask = np.pad(np.asarray(blocked, dtype=bool), 1, constant_values=True)
     field = np.where(mask, 0.0, 1e9)
+
+    if vectorized and field.size >= 1024:
+
+        def axis_minimum(values):
+            sites = np.arange(values.shape[1], dtype=float)
+            squared = (sites[:, None] - sites[None, :]) ** 2
+            output = np.empty_like(values)
+            # At the maximum 1024-cell side, the temporary stays near 64 MiB.
+            for row in range(0, values.shape[0], 8):
+                output[row : row + 8] = np.min(
+                    values[row : row + 8, :, None] + squared[None, :, :], axis=1
+                )
+            return output
+
+        field = axis_minimum(axis_minimum(field).T).T
+        return np.maximum(0.0, np.sqrt(field[1:-1, 1:-1]) * resolution - resolution / math.sqrt(2))
 
     def transform(f):
         n = len(f)
@@ -47,12 +64,17 @@ def distance_field(blocked, resolution):
 
 
 class RayMap:
+    WALL_CONFIRMATION_SCANS = 3
+
     def __init__(
         self, resolution=0.1, size=120, origin=(-6.0, -6.0), body_radius=0.3, clearance=1.1
     ):
         self.resolution = resolution
         self.origin = np.array(origin, dtype=float)
-        self.grid = np.zeros((size, size), dtype=np.uint8)
+        shape = (size, size) if isinstance(size, int) else tuple(size)
+        self.grid = np.zeros(shape, dtype=np.uint8)
+        self.wall_hit_scans = np.zeros(shape, dtype=np.uint8)
+        self.confirmed_walls = np.zeros(shape, dtype=bool)
         self.body_radius = body_radius
         self.clearance = clearance
         self.scans = 0
@@ -116,7 +138,8 @@ class RayMap:
             & (cells[:, :, 1] >= 0)
             & (cells[:, :, 1] < h)
         )
-        self.grid[cells[:, :, 1][good], cells[:, :, 0][good]] = FREE
+        free_cells = np.zeros(self.grid.shape, dtype=bool)
+        free_cells[cells[:, :, 1][good], cells[:, :, 0][good]] = True
         endpoints = np.floor((hits - self.origin) / self.resolution).astype(int)
         good = (
             (endpoints[:, 0] >= 0)
@@ -124,7 +147,21 @@ class RayMap:
             & (endpoints[:, 1] >= 0)
             & (endpoints[:, 1] < h)
         )
-        self.grid[endpoints[good, 1], endpoints[good, 0]] = OCCUPIED
+        hit_cells = np.zeros(self.grid.shape, dtype=bool)
+        hit_cells[endpoints[good, 1], endpoints[good, 0]] = True
+        # One vote per cell per accepted scan, independent of beam density.
+        # Hits win conflicts within a scan. Missing coverage is neutral; an
+        # explicit free-only observation resets an unconfirmed hit streak.
+        free_only = free_cells & ~hit_cells
+        self.wall_hit_scans[free_only & ~self.confirmed_walls] = 0
+        self.wall_hit_scans[hit_cells] = np.minimum(
+            self.WALL_CONFIRMATION_SCANS, self.wall_hit_scans[hit_cells] + 1
+        )
+        self.confirmed_walls |= self.wall_hit_scans >= self.WALL_CONFIRMATION_SCANS
+        self.grid[free_only & ~self.confirmed_walls] = FREE
+        # A first hit blocks planning immediately. Confirmation adds persistence,
+        # not permission to ignore a newly observed obstacle.
+        self.grid[hit_cells | self.confirmed_walls] = OCCUPIED
         # The current physical vehicle footprint is our known start volume.
         # Never erase an observed occupied cell with this footprint seed.
         yy, xx = np.indices(self.grid.shape)
@@ -134,6 +171,14 @@ class RayMap:
         self.grid[footprint & (self.grid == UNKNOWN)] = START_AREA
         self.scans += 1
         return hits
+
+    def wall_policy(self):
+        return dict(
+            mode="confirmed_until_reset",
+            confirmation_scans=self.WALL_CONFIRMATION_SCANS,
+            confirmed_cells=int(self.confirmed_walls.sum()),
+            tentative_cells=int(((self.grid == OCCUPIED) & ~self.confirmed_walls).sum()),
+        )
 
     def geometry(self):
         clearance = distance_field(self.grid == OCCUPIED, self.resolution)

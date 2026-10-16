@@ -7,7 +7,7 @@ Implemented on 2026-10-14. 42 navigation checks pass, including a full detour
 with a one-second response lag. A live map is now receiving scans after the
 operator applied the 0.5 m sensor setting. The first operator-commanded mapped
 goal reached its destination in live Isaac/PX4 on 2026-10-14; see result below.
-Current extension: TEACHER_GUIDE.txt documents frontier exploration and the
+Current extension: README.md documents frontier exploration and the
 faster 0.5 m/s profile. Both are prepared on disk; live exploration is pending.
 Settings are loaded from config/navigation_settings.json at process start.
 

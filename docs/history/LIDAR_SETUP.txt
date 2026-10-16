@@ -1,6 +1,6 @@
 HISTORICAL EXPERIMENT NOTES
 Dated results and troubleshooting are preserved below. For the current setup,
-read README.md and TEACHER_GUIDE.txt in the project root.
+read README.md in the project root.
 
 LiDAR increment 1: observable delivery, scene inventory and raw viewer
 ===================================================================

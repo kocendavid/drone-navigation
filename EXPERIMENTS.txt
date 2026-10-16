@@ -2,7 +2,7 @@ Roadmap: from measured movement to autonomous exploration
 =========================================================
 The user requested larger increments: repeated control, mapping and route
 planning are now being combined into one mapped-goal navigation milestone.
-See docs/MAPPED_NAVIGATION.txt and TEACHER_GUIDE.txt. The first live map-goal flight
+See docs/MAPPED_NAVIGATION.txt and README.md. The first live map-goal flight
 reached its destination on 2026-10-14. Frontier exploration and a faster profile
 are now prepared; their live run remains pending.
 Every stage has a question, predicted result, measured result and explanation.

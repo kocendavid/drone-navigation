@@ -1,0 +1,72 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Map
+      Name: LiDAR occupancy map
+      Enabled: true
+      Alpha: 0.9
+      Color Scheme: map
+      Topic:
+        Value: /navigation/map
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+    - Class: rviz_default_plugins/Path
+      Name: Planned route
+      Enabled: true
+      Color: 70; 210; 255
+      Line Style: Lines
+      Line Width: 0.08
+      Topic:
+        Value: /navigation/path
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+    - Class: rviz_default_plugins/Path
+      Name: Actually flown trail
+      Enabled: true
+      Color: 177; 184; 209
+      Line Style: Lines
+      Line Width: 0.04
+      Topic:
+        Value: /navigation/trail
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+    - Class: rviz_default_plugins/Pose
+      Name: Drone pose
+      Enabled: true
+      Color: 255; 220; 70
+      Shape: Arrow
+      Topic:
+        Value: /navigation/pose
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Depth: 1
+  Global Options:
+    Fixed Frame: world
+    Background Color: 25; 28; 35
+    Frame Rate: 15
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Maze map
+      Target Frame: world
+      Scale: 20
+      X: -2
+      Y: -15
+      Angle: 0
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Measure
+Window Geometry:
+  Width: 1200
+  Height: 800

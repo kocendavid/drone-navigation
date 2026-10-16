@@ -1,13 +1,23 @@
 {
-  "cruise_m_s": 0.5,
+  "cruise_m_s": 1.0,
   "slow_distance_m": 1.0,
   "stop_distance_m": 0.65,
   "minimum_approach_m_s": 0.08,
   "acceleration_m_s2": 0.25,
+  "braking_reaction_s": 0.5,
   "turn_speed_m_s": 0.15,
+  "yaw_rate_deg_s": 45.0,
+  "yaw_acceleration_deg_s2": 90.0,
   "target_lead_m": 0.28,
   "body_radius_m": 0.3,
   "obstacle_margin_m": 0.8,
   "near_range_m": 0.5,
-  "exploration_max_goals": 20
+  "exploration_max_goals": 20,
+  "exploration_replan_interval_s": 2.0,
+  "floor_z_m": -3.9803731091662193,
+  "map_resolution_m": 0.2,
+  "map_width_cells": 320,
+  "map_height_cells": 120,
+  "map_origin_x_m": -34.0,
+  "map_origin_y_m": -27.0
 }

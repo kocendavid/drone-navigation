@@ -1,10 +1,13 @@
 """Meaningful mapping, detour, persistent control and local-dashboard checks."""
 
 import json
+from collections import deque
+from io import StringIO
 import math
 from pathlib import Path
 from queue import Queue
 import sys
+import threading
 from types import MethodType, SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,9 +17,15 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from navigation.mapping import RayMap, distance_field, FREE, OCCUPIED, UNKNOWN, START_AREA
-from navigation.planning import plan, segment_safe, astar, reachable_mask
-from navigation.motion import RouteFollower, FrameAlignment, approach_speed
-from navigation.feed import MapSnapshot
+from navigation.planning import plan, segment_safe, astar, reachable_mask, route_distances
+from navigation.motion import (
+    RouteFollower,
+    FrameAlignment,
+    approach_speed,
+    smooth_yaw,
+    braking_speed,
+)
+from navigation.feed import MapSnapshot, MapFeed
 from navigation.dashboard import Dashboard
 from navigation.exploration import (
     frontiers,
@@ -24,8 +33,12 @@ from navigation.exploration import (
     choose_frontier,
     ExplorationSession,
     ExplorationChoice,
+    wall_endings,
 )
 from navigation.settings import NavigationSettings, load_settings
+from navigation.mission import ExploreMission, assess_completion
+from navigation.ros_map import map_message
+from px4_msgs.msg import VehicleStatus, VehicleCommand
 from ros2_navigate import GoalNavigator
 from test_step import node_fixture
 
@@ -58,6 +71,30 @@ def snapshot(box=False):
 
 
 class MappingTests(unittest.TestCase):
+    def test_chunked_large_map_distance_field_matches_exact_linear_reference(self):
+        rng = np.random.default_rng(42)
+        blocked = rng.random((70, 130)) < 0.08
+        np.testing.assert_allclose(
+            distance_field(blocked, 0.2),
+            distance_field(blocked, 0.2, vectorized=False),
+            atol=1e-12,
+        )
+
+    def test_translated_rectangular_maze_observations_keep_world_coordinates(self):
+        settings = load_settings()
+        model = RayMap(**settings.map_options())
+        body = np.array([-28.0, -17.0])
+        z = settings.floor_z_m + 1.0
+        theta = np.linspace(0, 2 * math.pi, 720, endpoint=False)
+        points = np.column_stack((3 * np.cos(theta), 3 * np.sin(theta), np.zeros(720)))
+        model.update(points, np.eye(3), np.array([*body, z]), body, z, 0.5)
+        self.assertEqual(model.grid.shape, (120, 320))
+        self.assertTrue(model.inside(model.cell(body)))
+        self.assertFalse(model.inside(model.cell([31.0, -17.0])))
+        cell = model.cell(body + [2.0, 0.0])
+        self.assertEqual(model.grid[cell], FREE)
+        self.assertLess(math.dist(model.world(cell), body + [2.0, 0.0]), 0.3)
+
     def test_distance_transform_matches_exact_obstacle_distances(self):
         mask = np.zeros((8, 10), dtype=bool)
         mask[3, 5] = True
@@ -89,12 +126,56 @@ class MappingTests(unittest.TestCase):
         model.update(self.circle(0.55), np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
         self.assertEqual(model.grid[model.cell([0.55, 0])], OCCUPIED)
 
-    def test_new_valid_rays_can_clear_a_removed_obstacle(self):
+    def test_new_valid_rays_can_clear_an_unconfirmed_single_scan_obstacle(self):
         model = RayMap()
         model.update(self.circle(2), np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
         self.assertEqual(model.grid[model.cell([2.0, 0])], OCCUPIED)
         model.update(self.circle(4), np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
         self.assertEqual(model.grid[model.cell([2.0, 0])], FREE)
+
+    def test_confirmed_walls_survive_free_rays_and_a_new_map_clears_confirmation(self):
+        model = RayMap()
+        for _ in range(3):
+            model.update(self.circle(2), np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
+        cell = model.cell([2.0, 0])
+        self.assertTrue(model.confirmed_walls[cell])
+        before = model.confirmed_walls.copy()
+        for _ in range(5):
+            model.update(self.circle(4), np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
+            self.assertTrue((model.grid[before] == OCCUPIED).all())
+        _, body_free, safe = model.geometry()
+        self.assertFalse(body_free[cell])
+        self.assertFalse(safe[cell])
+        reset = RayMap()
+        self.assertFalse(reset.confirmed_walls.any())
+        self.assertFalse(reset.wall_hit_scans.any())
+
+    def test_dense_hits_in_one_scan_block_immediately_but_are_not_confirmed(self):
+        model = RayMap()
+        model.update(self.circle(2), np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
+        self.assertFalse(model.confirmed_walls.any())
+        self.assertEqual(int(model.wall_hit_scans.max()), 1)
+        self.assertGreater(model.wall_policy()["tentative_cells"], 0)
+        self.assertGreater(int((model.grid == OCCUPIED).sum()), 100)
+
+    def test_conflicting_free_observation_resets_tentative_confirmation(self):
+        model = RayMap()
+        for radius in (2, 2, 4, 2, 2):
+            model.update(self.circle(radius), np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
+        cell = model.cell([2.0, 0])
+        self.assertFalse(model.confirmed_walls[cell])
+        self.assertEqual(model.wall_hit_scans[cell], 2)
+        model.update(self.circle(2), np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
+        self.assertTrue(model.confirmed_walls[cell])
+
+    def test_invalid_scan_does_not_add_confirmation_evidence(self):
+        model = RayMap()
+        model.update(self.circle(2), np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
+        before = model.wall_hit_scans.copy()
+        with self.assertRaises(ValueError):
+            model.update(self.circle(2)[:20], np.eye(3), np.zeros(3), [0, 0], 0.0, 0.5)
+        np.testing.assert_array_equal(model.wall_hit_scans, before)
+        self.assertEqual(model.scans, 1)
 
     def test_sparse_or_wrong_height_returns_do_not_create_free_space(self):
         for points in (self.circle(4)[:20], self.circle(4) + [0, 0, 5.0]):
@@ -105,6 +186,12 @@ class MappingTests(unittest.TestCase):
 
 
 class PlanningTests(unittest.TestCase):
+    def test_frontier_distance_counts_the_detour_in_known_space(self):
+        snap = snapshot(True)
+        distances = route_distances(snap, [-3.0, 0.0])
+        self.assertGreater(distances[snap.model.cell([3.0, 0.0])], 6.0)
+        self.assertTrue(math.isinf(distances[snap.model.cell([0.0, 0.0])]))
+
     def test_route_detours_around_inflated_box(self):
         snap = snapshot(True)
         route = plan(snap, [-3.0, 0.0], [3.0, 0.0])
@@ -149,6 +236,96 @@ class PlanningTests(unittest.TestCase):
 
 
 class MotionTests(unittest.TestCase):
+    def test_braking_limit_reserves_reaction_travel_and_stopping_distance(self):
+        for distance in (0.65, 0.7, 0.8, 1.0, 2.0, 3.15, 5.0):
+            speed = braking_speed(distance, 0.65, 0.25, 0.5)
+            self.assertGreaterEqual(speed, 0)
+            self.assertLessEqual(speed * 0.5 + speed**2 / (2 * 0.25), distance - 0.65 + 1e-12)
+        self.assertAlmostEqual(braking_speed(3.15, 0.65, 0.25, 0.5), 1.0)
+        self.assertLess(braking_speed(1.0, 0.65, 0.25, 0.5), 0.5)
+        self.assertEqual(braking_speed(None, 0.65, 0.25, 0.5), 0)
+
+    def test_double_cruise_profile_tracks_a_goal_before_a_wall_with_response_lag(self):
+        settings = load_settings()
+        self.assertEqual(settings.cruise_m_s, 1.0)
+        follower = RouteFollower(settings)
+        follower.begin([[0.0, 0.0], [6.0, 0.0]])
+        actual = np.zeros(2)
+        peak = 0.0
+        minimum_clearance = math.inf
+        for _ in range(2000):
+            follower.tick(0.05, actual, np.array([[7.0, 0.0]]))
+            actual += (follower.target - actual) * 0.05 / 0.2
+            peak = max(peak, follower.speed)
+            minimum_clearance = min(minimum_clearance, 7.0 - actual[0])
+            self.assertIn(follower.phase, ("NAVIGATING", "SETTLING"))
+            if follower.phase == "SETTLING" and np.linalg.norm(actual - [6.0, 0.0]) < 0.05:
+                break
+        else:
+            self.fail("Faster reference did not settle at its goal")
+        self.assertGreater(peak, 0.95)
+        self.assertLessEqual(peak, 1.0 + 1e-12)
+        self.assertGreater(minimum_clearance, settings.stop_distance_m)
+
+    def test_fast_cruise_brakes_before_entering_the_bend_zone(self):
+        follower = RouteFollower(load_settings())
+        follower.begin([[0, 0], [6, 0], [6, 6]])
+        peak, bend_speeds = 0.0, []
+        for _ in range(2000):
+            actual = follower.target.copy()
+            follower.tick(0.05, actual, np.empty((0, 2)), observed_corridor=True)
+            peak = max(peak, follower.speed)
+            if follower.index == 1 and np.linalg.norm(follower.target - [6, 0]) < 0.4:
+                bend_speeds.append(follower.speed)
+            if follower.phase == "SETTLING":
+                break
+        self.assertGreater(peak, 0.95)
+        self.assertTrue(bend_speeds)
+        self.assertLessEqual(max(bend_speeds), follower.settings.turn_speed_m_s + 0.02)
+
+    def test_yaw_turns_shortest_way_across_angle_wrap(self):
+        yaw, rate = smooth_yaw(
+            math.radians(179), 0.0, math.radians(-179), 0.1, math.radians(45), math.radians(90)
+        )
+        self.assertGreater(rate, 0)
+        self.assertLess(abs(math.remainder(math.radians(-179) - yaw, 2 * math.pi)), math.radians(2))
+
+    def test_yaw_rate_and_acceleration_stay_bounded_through_route_reversal(self):
+        yaw, rate = 0.0, 0.0
+        dt = 0.05
+        limit, acceleration = math.radians(45), math.radians(90)
+        for i in range(200):
+            desired = math.pi / 2 if i < 40 else -math.pi / 2
+            previous_yaw, previous_rate = yaw, rate
+            yaw, rate = smooth_yaw(yaw, rate, desired, dt, limit, acceleration)
+            self.assertLessEqual(abs(rate), limit + 1e-12)
+            self.assertLessEqual(abs(rate - previous_rate), acceleration * dt + 1e-12)
+            self.assertLessEqual(
+                abs(math.remainder(yaw - previous_yaw, 2 * math.pi)), limit * dt + 1e-12
+            )
+        self.assertLess(abs(math.remainder(yaw + math.pi / 2, 2 * math.pi)), 0.001)
+
+    def test_yaw_freezes_when_stopped_or_simulation_time_is_unusable(self):
+        for desired, dt in ((None, 0.1), (1.0, 0), (1.0, 0.6), (1.0, math.nan)):
+            yaw, rate = smooth_yaw(0.4, 0.2, desired, dt, 0.8, 1.5)
+            self.assertEqual(yaw, 0.4)
+            self.assertEqual(rate, 0)
+
+    def test_route_heading_conversion_corrects_bias_without_rotating_positions(self):
+        alignment = FrameAlignment([0, 0], 0.2, [0, 0], math.pi / 2)
+        for vector, bearing in (
+            ([1, 0], 0),
+            ([0, 1], math.pi / 2),
+            ([-1, 0], math.pi),
+            ([0, -1], -math.pi / 2),
+        ):
+            heading = alignment.yaw_ned(vector)
+            true_world = math.pi / 2 - heading + alignment.heading_bias
+            self.assertAlmostEqual(math.remainder(true_world - bearing, 2 * math.pi), 0)
+        np.testing.assert_allclose(alignment.world([1, 0]), [0, 1])
+        with self.assertRaises(ValueError):
+            alignment.yaw_ned([0, 0])
+
     def test_faster_distance_bands_slow_below_one_metre_and_stop_at_point_65(self):
         self.assertEqual(approach_speed(0.65), 0.0)
         self.assertEqual(approach_speed(None), 0.0)
@@ -228,11 +405,20 @@ def navigator_fixture():
     node.feed = SimpleNamespace(get=lambda: (snap, None))
     node.dashboard = SimpleNamespace(note="", report={})
     node.status_wall = 100.0
+    node.status_sim_s = 100.0
+    node.auto_recover = False
+    node.recovery_stamp = None
+    node.recovery_scans = 0
+    node.recovery_started_s = None
     node.commands = Queue()
+    node.land_pub = SimpleNamespace(get_subscription_count=lambda: 1, publish=lambda msg: None)
+    node.status.pre_flight_checks_pass = True
     node.alignment = FrameAlignment([2.0, 3.0], math.pi / 2, [2.0, 3.0], 0.0)
     node.world_pose = np.array([2.0, 3.0])
     node.reference = np.array([2.0, 3.0])
     node.hold_yaw = 0.0
+    node.yaw_rate = 0.0
+    node.yaw_desired = None
     node.follower = RouteFollower()
     node.follower.begin([[2.0, 3.0], [2.0, 2.0]])
     node.target_goal = np.array([2.0, 2.0])
@@ -245,15 +431,46 @@ def navigator_fixture():
     node.plan_thread = None
     node.last_report = 100.0
     node.exploration = ExplorationSession()
+    node.reconsider_thread = None
+    node.reconsider_results = Queue()
+    node.reconsider_mark = None
+    node.reconsider_stamp = None
+    node.active_ui_command = None
+    node.alignment_settled_since = None
+    node.alignment_capture_stamp = None
+    node.alignment_capture_scans = 0
+    node.mission = ExploreMission()
+    node.mission_resume_phase = None
+    node.last_completion_stamp = None
+    node.certified_grid = None
+    node.landed = False
+    node.landed_wall = None
+    node.landed_sim_s = None
     node.settings = NavigationSettings()
+    node.pose_history = deque([(100.0, [2.0, 3.0], 0.0)])
     for name in (
         "flight_active",
+        "status_fresh",
         "stable",
         "stop",
         "commands_tick",
         "launch_plan",
         "launch_frontier",
         "exploration_tick",
+        "map_pose_matches",
+        "mission_tick",
+        "recovery_tick",
+        "launch_reconsideration",
+        "reconsideration_tick",
+        "capture_alignment",
+        "retire_obsolete_goal",
+        "command_feedback",
+        "update_command_progress",
+        "reject_pending_commands",
+        "flight_readiness",
+        "update_yaw",
+        "launch_mission_check",
+        "launch_map_save",
     ):
         setattr(node, name, MethodType(getattr(GoalNavigator, name), node))
     node.update_dashboard = lambda *args: None
@@ -261,6 +478,368 @@ def navigator_fixture():
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_yaw_changes_with_route_without_changing_position_reference(self):
+        node, modes, targets, _ = navigator_fixture()
+        node.pacer.total_s += 0.1
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            GoalNavigator.publish_target(node)
+        self.assertEqual(len(modes), 1)
+        self.assertGreater(targets[-1].yaw, 0)
+        self.assertLess(targets[-1].yaw, math.radians(45) * 0.1)
+        np.testing.assert_allclose(targets[-1].position[:2], node.reference, atol=1e-6)
+
+    def test_yaw_freezes_on_hold_stale_map_or_callback_gap(self):
+        for phase, map_ready, gap in (
+            ("HOLD", True, 0.1),
+            ("BLOCKED", True, 0.1),
+            ("NAVIGATING", False, 0.1),
+            ("NAVIGATING", True, 0.8),
+        ):
+            node, _, _, _ = navigator_fixture()
+            node.follower.phase = phase
+            node.hold_yaw, node.yaw_rate = 0.4, 0.2
+            node.update_yaw(0.1, 100.0, map_ready, gap)
+            self.assertEqual(node.hold_yaw, 0.4)
+            self.assertEqual(node.yaw_rate, 0)
+
+    def test_yaw_reference_remains_continuous_when_frontier_target_changes(self):
+        node, _, _, _ = navigator_fixture()
+        node.update_yaw(0.1, 100.0, True, 0.1)
+        before = node.hold_yaw
+        node.follower.retarget([[2, 3], [4, 3]])
+        node.update_yaw(0.1, 100.0, True, 0.1)
+        self.assertLessEqual(
+            abs(math.remainder(node.hold_yaw - before, 2 * math.pi)), math.radians(45) * 0.1
+        )
+
+    def test_ground_flight_setup_names_takeoff_and_requires_fresh_landed_state(self):
+        node, _, _, _ = navigator_fixture()
+        node.status.arming_state = VehicleStatus.ARMING_STATE_DISARMED
+        node.position.z = 0.0
+        node.landed = True
+        node.landed_wall = node.landed_sim_s = 100.0
+        result = node.flight_readiness(100.0, False)
+        self.assertTrue(result["can_takeoff"])
+        self.assertFalse(result["can_enable_navigation"])
+        self.assertIn("Take off to 1 m", result["next_step"])
+        node.landed_wall = 80.0
+        self.assertFalse(node.flight_readiness(100.0, False)["can_takeoff"])
+
+    def test_offboard_button_requires_map_alignment_stability_and_target_stream(self):
+        node, _, _, _ = navigator_fixture()
+        node.status.nav_state = VehicleStatus.NAVIGATION_STATE_AUTO_LOITER
+        self.assertTrue(node.flight_readiness(100.0, True)["can_enable_navigation"])
+        self.assertIn("Enable navigation", node.flight_readiness(100.0, True)["next_step"])
+        self.assertFalse(node.flight_readiness(100.0, False)["can_enable_navigation"])
+        node.ready_samples = 0
+        self.assertFalse(node.flight_readiness(100.0, True)["can_enable_navigation"])
+
+    def test_hold_cancels_queued_movement_and_stale_planner_results(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        replies = []
+        node.dashboard.acknowledge_command = lambda request, status, reason: replies.append(
+            (request, status)
+        )
+        old_generation = node.plan_generation
+        node.commands.put(dict(action="goal", point=[2.0, 2.0], request_id="before"))
+        node.commands.put(dict(action="hold", request_id="hold"))
+        node.commands.put(dict(action="explore", request_id="after"))
+        node.commands_tick(100.0, snap, True)
+        self.assertEqual(node.follower.phase, "HOLD")
+        self.assertIsNone(node.target_goal)
+        self.assertGreater(node.plan_generation, old_generation)
+        self.assertIn(("before", "cancelled"), replies)
+        self.assertIn(("after", "cancelled"), replies)
+        self.assertIn(("hold", "accepted"), replies)
+
+    def test_expired_click_does_not_execute_late(self):
+        node, _, _, _ = navigator_fixture()
+        replies = []
+        node.dashboard.acknowledge_command = lambda request, status, reason: replies.append(status)
+        node.commands.put(dict(action="hold", request_id="expired", _deadline=99.0))
+        node.commands_tick(100.0, node.feed.get()[0], True)
+        self.assertEqual(replies, ["expired"])
+        self.assertEqual(node.follower.phase, "NAVIGATING")
+
+    def test_rejected_click_has_a_correlated_reason_and_does_not_reset_exploration(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        node.exploration.start(snap)
+        node.exploration.reached = 5
+        replies = []
+        node.dashboard.acknowledge_command = lambda request, status, reason: replies.append(
+            (request, status, reason)
+        )
+        node.commands.put(dict(action="explore", request_id="duplicate-session"))
+        node.commands_tick(100.0, snap, True)
+        self.assertEqual(node.exploration.reached, 5)
+        self.assertEqual(replies[-1][0:2], ("duplicate-session", "rejected"))
+
+    def test_mission_verification_is_not_reported_finished_before_landing(self):
+        node, _, _, _ = navigator_fixture()
+        node.mission.start()
+        node.mission.phase = "VERIFYING"
+        node.active_ui_command = dict(action="mission", request_id="landing-mission")
+        node.follower.hold(node.world_pose, "Verifying enclosure")
+        replies = []
+        node.dashboard.acknowledge_command = lambda request, status, reason: replies.append(status)
+        node.update_command_progress()
+        self.assertEqual(replies, ["running"])
+        self.assertIsNotNone(node.active_ui_command)
+
+    def test_alignment_waits_for_continuous_stable_hover_and_three_fresh_scans(self):
+        node, _, _, _ = navigator_fixture()
+        node.alignment = None
+        snap = node.feed.get()[0]
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            for i in range(3):
+                node.pacer.total_s = 100.0 + i
+                snap.stamp += 1
+                node.capture_alignment(snap, True)
+                if i < 2:
+                    self.assertIsNone(node.alignment)
+        self.assertIsNotNone(node.alignment)
+
+    def test_brief_takeoff_pause_does_not_lock_in_an_alignment(self):
+        node, _, _, _ = navigator_fixture()
+        node.alignment = None
+        snap = node.feed.get()[0]
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            node.capture_alignment(snap, True)
+            node.pacer.total_s += 1.0
+            node.position.vx = 0.2
+            node.capture_alignment(snap, True)
+        self.assertIsNone(node.alignment_settled_since)
+        self.assertEqual(node.alignment_capture_scans, 0)
+
+    def test_exploration_retires_obsolete_destination_but_does_not_ignore_pose_faults(self):
+        node, _, _, _ = navigator_fixture()
+        node.exploration.start(node.feed.get()[0], continuous=True)
+        node.exploration.phase = "TRAVELLING"
+        self.assertFalse(
+            node.retire_obsolete_goal("Current vehicle footprint is not sufficiently observed")
+        )
+        self.assertIsNotNone(node.target_goal)
+        self.assertTrue(
+            node.retire_obsolete_goal("Choose an observed destination outside the obstacle margin")
+        )
+        self.assertIsNone(node.target_goal)
+        self.assertEqual(node.exploration.phase, "SELECTING")
+        self.assertEqual(node.follower.phase, "HOLD")
+
+    def test_small_target_change_switches_without_reference_jump_or_switching_radius(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        node.exploration.start(snap, continuous=True, simulation_s=100.0)
+        node.exploration.phase = "TRAVELLING"
+        node.reconsider_mark = node.pacer.total_s
+        previous = node.target_goal.copy()
+        new_goal = [previous[0] + 0.2, previous[1]]
+        choice = ExplorationChoice(new_goal, [list(node.world_pose), new_goal], 3.0, 1.0, 20)
+        reference = node.follower.target.copy()
+        node.reconsider_results.put((node.plan_generation, previous, 0.2, choice, None))
+        node.reconsideration_tick(snap)
+        np.testing.assert_array_equal(node.follower.target, reference)
+        np.testing.assert_array_equal(node.target_goal, new_goal)
+        self.assertEqual(node.exploration.target_switches, 1)
+        self.assertEqual(node.exploration.current_target_gain_m2, 3.0)
+
+    def test_cancelled_reconsideration_cannot_replace_a_newer_goal(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        node.exploration.start(snap, continuous=True)
+        node.exploration.phase = "TRAVELLING"
+        node.reconsider_mark = node.pacer.total_s
+        previous = node.target_goal.copy()
+        choice = ExplorationChoice([3.0, 2.0], [list(node.world_pose), [3.0, 2.0]], 3.0, 1.0, 20)
+        node.reconsider_results.put((node.plan_generation - 1, previous, 0.2, choice, None))
+        node.reconsideration_tick(snap)
+        np.testing.assert_array_equal(node.target_goal, previous)
+        self.assertEqual(node.exploration.target_switches, 0)
+
+    def test_new_map_obstacle_rejects_reconsidered_route(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        node.exploration.start(snap, continuous=True)
+        node.exploration.phase = "TRAVELLING"
+        node.reconsider_mark = node.pacer.total_s
+        previous = node.target_goal.copy()
+        choice = ExplorationChoice([3.0, 2.0], [list(node.world_pose), [3.0, 2.0]], 3.0, 1.0, 20)
+        snap.body_free[snap.model.cell([2.5, 2.5])] = False
+        node.reconsider_results.put((node.plan_generation, previous, 0.2, choice, None))
+        node.reconsideration_tick(snap)
+        np.testing.assert_array_equal(node.target_goal, previous)
+        self.assertEqual(node.exploration.target_switches, 0)
+        self.assertIn("no longer observed", node.exploration.reconsider_reason)
+
+    def test_reconsideration_computes_in_background_without_holding_existing_motion(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        node.exploration.start(snap, continuous=True)
+        node.exploration.phase = "TRAVELLING"
+        reference = node.follower.target.copy()
+        choice = ExplorationChoice([3.0, 2.0], [list(node.world_pose), [3.0, 2.0]], 3.0, 1.0, 20)
+        with patch("ros2_navigate.choose_frontier", return_value=choice):
+            node.launch_reconsideration(snap)
+            node.reconsider_thread.join(2)
+        self.assertEqual(node.follower.phase, "NAVIGATING")
+        np.testing.assert_array_equal(node.follower.target, reference)
+        self.assertFalse(node.reconsider_results.empty())
+        self.assertEqual(node.exploration.reconsiderations, 1)
+
+    def test_endpoint_free_strip_requires_observed_route_and_still_stops_for_obstacle(self):
+        follower = RouteFollower()
+        path = [[0.0, 0.0], [2.0, 0.0]]
+        follower.begin(path)
+        follower.tick(0.1, [0.0, 0.0], np.empty((0, 2)))
+        self.assertEqual(follower.phase, "BLOCKED")
+        follower.begin(path)
+        follower.tick(0.1, [0.0, 0.0], np.empty((0, 2)), observed_corridor=True)
+        self.assertEqual(follower.phase, "NAVIGATING")
+        self.assertGreater(follower.target[0], 0.0)
+        follower.tick(0.1, [0.0, 0.0], np.array([[0.6, 0.0]]), observed_corridor=True)
+        self.assertEqual(follower.phase, "BLOCKED")
+        np.testing.assert_array_equal(follower.target, [0.0, 0.0])
+
+    def test_transient_map_pause_requires_three_fresh_scans_before_replanning(self):
+        node, _, _, _ = navigator_fixture()
+        node.mission.start()
+        snap = node.feed.get()[0]
+        node.stop("Temporary map gap", auto_recover=True)
+        launched = []
+        node.launch_plan = lambda item: launched.append(item.stamp)
+        for index in range(3):
+            snap.stamp += 1
+            node.pacer.total_s = 100.0 + index * 0.5
+            node.recovery_tick(100.0, snap, True)
+            if index < 2:
+                self.assertTrue(node.commands.empty())
+        self.assertFalse(node.commands.empty())
+        node.commands_tick(100.0, snap, True)
+        self.assertTrue(launched)
+        self.assertEqual(node.mission.phase, "EXPLORING")
+        node.stop("Operator hold", "HOLD", True)
+        self.assertFalse(node.auto_recover)
+        self.assertFalse(node.mission.enabled)
+
+    def test_imu_clock_confirmation_freezes_reference_without_cancelling_mission(self):
+        node, modes, targets, _ = navigator_fixture()
+        node.mission.start()
+        node.pacer.confirming = 3
+        self.assertFalse(node.pacer.fresh(100.0))
+        self.assertTrue(node.flight_active(100.0))
+        before = node.follower.target.copy()
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            GoalNavigator.publish_target(node)
+        self.assertEqual(node.mission.phase, "EXPLORING")
+        np.testing.assert_array_equal(node.follower.target, before)
+        self.assertTrue(modes and targets)
+
+    def test_status_uses_simulation_age_with_real_time_and_imu_watchdogs(self):
+        node, _, _, _ = navigator_fixture()
+        node.status_wall = 97.0
+        node.status_sim_s = 99.5
+        self.assertTrue(node.flight_active(100.0))
+        node.status_sim_s = 97.0
+        self.assertFalse(node.flight_active(100.0))
+        node.status_sim_s = 99.5
+        node.status_wall = 89.0
+        self.assertFalse(node.flight_active(100.0))
+        node.status_wall = 99.0
+        node.pacer.last_progress = 98.0
+        self.assertFalse(node.flight_active(100.0))
+
+    def test_mission_lands_only_after_completion_save_and_confirmed_px4_mode(self):
+        node, modes, targets, _ = navigator_fixture()
+        commands = []
+        node.land_pub = SimpleNamespace(publish=commands.append, get_subscription_count=lambda: 1)
+        node.mission.start()
+        node.target_goal = None
+        node.follower.hold(node.world_pose)
+        snap = node.feed.get()[0]
+        evidence = assess_completion(snap, node.world_pose)
+        self.assertTrue(evidence.complete)
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            for _ in range(3):
+                snap.stamp += 1
+                node.pacer.total_s += 0.6
+                node.plan_results.put(
+                    (node.plan_generation, evidence, None, ("mission_check", snap.stamp))
+                )
+                GoalNavigator.publish_target(node)
+            self.assertEqual(node.mission.phase, "SAVING")
+            self.assertEqual(commands, [])
+            node.plan_results.put((node.plan_generation, "saved-map", None, "mission_saved"))
+            GoalNavigator.publish_target(node)
+            GoalNavigator.publish_target(node)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0].command, VehicleCommand.VEHICLE_CMD_NAV_LAND)
+            self.assertTrue(math.isnan(commands[0].param5))
+            self.assertEqual(commands[0].timestamp, 0)
+            count = len(targets)
+            node.status.nav_state = VehicleStatus.NAVIGATION_STATE_AUTO_LAND
+            GoalNavigator.publish_target(node)
+            self.assertEqual(len(targets), count)
+            self.assertEqual(node.mission.phase, "LANDING")
+            node.status.arming_state = VehicleStatus.ARMING_STATE_DISARMED
+            node.landed = True
+            node.landed_wall = 100.0
+            node.landed_sim_s = node.pacer.total_s
+            GoalNavigator.publish_target(node)
+        self.assertEqual(node.mission.phase, "LANDED")
+        self.assertFalse(node.mission.enabled)
+
+    def test_mission_map_save_error_keeps_hover_without_landing(self):
+        node, modes, targets, _ = navigator_fixture()
+        node.mission.start()
+        node.mission.phase = "SAVING"
+        node.target_goal = None
+        node.follower.hold(node.world_pose)
+        node.plan_results.put((node.plan_generation, None, "Disk full", "mission_saved"))
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            GoalNavigator.publish_target(node)
+        self.assertEqual(node.mission.phase, "INCOMPLETE")
+        self.assertTrue(modes and targets)
+
+    def test_stale_position_pauses_completion_and_requires_new_proof_on_resume(self):
+        node, _, _, _ = navigator_fixture()
+        node.mission.start()
+        node.mission.phase = "SAVING"
+        node.follower.hold(node.world_pose)
+        node.state.last_progress = 95.0
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            GoalNavigator.publish_target(node)
+        self.assertEqual(node.mission.phase, "PAUSED")
+        self.assertEqual(node.mission_resume_phase, "VERIFYING")
+
+    def test_rviz_map_uses_world_origin_rows_and_preserves_unknown_prior(self):
+        snap = snapshot()
+        snap.model.grid[30, 31] = START_AREA
+        message = map_message(snap, -2.98)
+        self.assertEqual(message.header.frame_id, "world")
+        self.assertEqual(message.info.origin.position.x, -6.0)
+        self.assertEqual(message.info.origin.position.z, -2.98)
+        self.assertEqual(message.data[30 * 120 + 31], -1)
+        self.assertEqual(message.data[50 * 120 + 50], 0)
+        self.assertEqual(message.data[15 * 120 + 50], 100)
+
+    def test_frame_check_uses_position_at_cloud_receipt_during_motion(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        node.world_pose = np.array([3.0, 3.0])
+        self.assertTrue(node.map_pose_matches(snap))
+        snap.pose[0] += 1.0
+        self.assertFalse(node.map_pose_matches(snap))
+
+    def test_frame_check_rejects_missing_or_old_pose_history(self):
+        node, _, _, _ = navigator_fixture()
+        snap = node.feed.get()[0]
+        node.pose_history = deque()
+        self.assertFalse(node.map_pose_matches(snap))
+        node.pose_history.append((99.0, [2.0, 3.0], 0.0))
+        self.assertFalse(node.map_pose_matches(snap))
+
     def test_map_failure_pauses_goal_but_retains_receipt_stamped_hover(self):
         node, modes, targets, _ = navigator_fixture()
         node.feed.get = lambda: (None, "Map worker exited")
@@ -312,7 +891,100 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(modes[-1].timestamp, 0)
 
 
+class MapFeedTests(unittest.TestCase):
+    def test_pipe_preserves_confirmed_wall_evidence_for_dashboard_and_exports(self):
+        feed = self.make_feed()
+        rows = [json.loads(line) for line in feed.process.stdout.getvalue().splitlines()]
+        for row in rows:
+            row["grid"] = "#" + row["grid"][1:]
+            row["confirmed_walls"] = "1" + "0" * (len(row["grid"]) - 1)
+        feed.process.stdout = StringIO("\n".join(json.dumps(row) for row in rows) + "\n")
+        with patch("navigation.feed.time.monotonic", return_value=100.0):
+            feed._read()
+        self.assertTrue(feed.snapshot.model.confirmed_walls[0, 0])
+        self.assertEqual(feed.snapshot.model.wall_policy()["confirmed_cells"], 1)
+
+    def test_pipe_rejects_confirmation_of_a_free_cell(self):
+        feed = self.make_feed()
+        row = json.loads(feed.process.stdout.getvalue().splitlines()[0])
+        row["confirmed_walls"] = "1" + "0" * (len(row["grid"]) - 1)
+        feed.process.stdout = StringIO(json.dumps(row) + "\n")
+        with patch("navigation.feed.time.monotonic", return_value=100.0):
+            feed._read()
+        self.assertIsNone(feed.snapshot)
+        self.assertIn("Confirmed walls must remain occupied", feed.failure)
+
+    def make_feed(self, width=320):
+        settings = load_settings()
+        feed = MapFeed.__new__(MapFeed)
+        feed.settings = settings
+        feed.lock = threading.Lock()
+        feed.session = "test"
+        feed.snapshot = None
+        feed.failure = None
+        feed.confirmed = 0
+        feed.stamp = None
+        theta = np.linspace(0, 2 * math.pi, 120, endpoint=False)
+        hits = np.column_stack((-28 + 3 * np.cos(theta), -17 + 3 * np.sin(theta))).tolist()
+        lines = []
+        for index in range(3):
+            lines.append(
+                json.dumps(
+                    dict(
+                        session="test",
+                        frame="world",
+                        generated_monotonic_s=100.0,
+                        width=width,
+                        height=120,
+                        resolution=0.2,
+                        origin=[-34.0, -27.0],
+                        grid="." * (width * 120),
+                        scans=1,
+                        fresh=True,
+                        stamp_ns=1000000000 + index,
+                        pose=[-28.0, -17.0, 0.0, -2.98],
+                        hits=hits,
+                        cloud_age_s=0.1,
+                        clock_age_s=0.1,
+                        reason="Live",
+                    )
+                )
+                + "\n"
+            )
+        feed.process = SimpleNamespace(stdout=StringIO("".join(lines)), poll=lambda: None)
+        return feed
+
+    def test_rectangular_pipe_preserves_geometry_and_closure_revokes_readiness(self):
+        feed = self.make_feed()
+        with patch("navigation.feed.time.monotonic", return_value=100.0):
+            feed._read()
+        self.assertEqual(feed.snapshot.model.grid.shape, (120, 320))
+        self.assertEqual(feed.snapshot.model.origin.tolist(), [-34.0, -27.0])
+        self.assertTrue(feed.snapshot.valid)
+        self.assertEqual(feed.get()[1], "Map worker output closed")
+
+    def test_wrong_configured_pipe_dimensions_are_rejected(self):
+        feed = self.make_feed(319)
+        with patch("navigation.feed.time.monotonic", return_value=100.0):
+            feed._read()
+        self.assertIsNone(feed.snapshot)
+        self.assertIn("Unexpected map geometry", feed.failure)
+
+
 class DashboardTests(unittest.TestCase):
+    def test_dashboard_reports_rectangular_dimensions(self):
+        snap = snapshot()
+        snap.model = RayMap(**load_settings().map_options())
+        snap.clearance, snap.body_free, snap.safe = snap.model.geometry()
+        hub = Dashboard(SimpleNamespace(get=lambda: (snap, None)), port=0)
+        try:
+            with patch("navigation.dashboard.time.monotonic", return_value=100.0):
+                state = hub.state()
+            self.assertEqual((state["width"], state["height"]), (320, 120))
+            self.assertEqual(len(state["grid"]), 320 * 120)
+        finally:
+            hub.close()
+
     def test_invalid_payloads_return_json_errors_without_queueing_flight_commands(self):
         snap = snapshot()
         commands = Queue()
@@ -384,12 +1056,134 @@ def frontier_snapshot():
 
 
 class ExplorationTests(unittest.TestCase):
+    def test_hidden_side_room_beats_far_plain_frontier_without_routing_through_wall(self):
+        snap = snapshot()
+        model = snap.model
+        model.grid[:] = UNKNOWN
+        model.grid[15:105, 15:60] = FREE
+        model.grid[:80, 60] = OCCUPIED
+        model.grid[80:100, 60:80] = FREE  # Observed doorway; room above/right is hidden.
+        model.confirmed_walls[:] = model.grid == OCCUPIED
+        snap.clearance, snap.body_free, snap.safe = model.geometry()
+        start = model.world((80, 40))
+        before = model.grid.copy()
+        choice = choose_frontier(snap, start)
+        self.assertIsNotNone(choice.corner_xy)
+        self.assertGreater(choice.hidden_area_m2, 0.12)
+        self.assertIn("Look around confirmed wall ending", choice.selection_reason)
+        self.assertTrue(snap.safe[model.cell(choice.goal)])
+        self.assertTrue(
+            all(
+                segment_safe(snap.safe, model.cell(a), model.cell(b))
+                for a, b in zip(choice.path, choice.path[1:])
+            )
+        )
+        np.testing.assert_array_equal(model.grid, before)
+        model.confirmed_walls[:] = False
+        fallback = choose_frontier(snap, start)
+        self.assertIsNone(fallback.corner_xy)
+        self.assertGreater(fallback.route_length_m, choice.route_length_m)
+
+    def test_mapped_room_does_not_remain_a_hidden_corner_opportunity(self):
+        snap = snapshot()
+        model = snap.model
+        model.grid[30:80, 60] = OCCUPIED
+        model.confirmed_walls[:] = model.grid == OCCUPIED
+        snap.clearance, snap.body_free, snap.safe = model.geometry()
+        self.assertEqual(wall_endings(model.grid, model.resolution, model.confirmed_walls), [])
+        with self.assertRaisesRegex(ValueError, "No observed free/unknown frontier remains"):
+            choose_frontier(snap, model.world((80, 40)))
+
+    def test_wall_ending_detection_is_rotation_independent_and_requires_confirmation(self):
+        grid = np.full((80, 80), UNKNOWN, dtype=np.uint8)
+        grid[10:70, 10:40] = FREE
+        grid[20:40, 40] = OCCUPIED
+        for turns in range(4):
+            rotated = np.rot90(grid, turns)
+            tips = wall_endings(rotated, 0.2, rotated == OCCUPIED)
+            self.assertEqual(len(tips), 2)
+            self.assertTrue(all(length >= 0.6 for _, _, length in tips))
+            self.assertEqual(wall_endings(rotated, 0.2, np.zeros_like(rotated, bool)), [])
+
+    def test_wall_middle_noise_and_fully_observed_end_are_not_hidden_passage_clues(self):
+        grid = np.full((80, 80), UNKNOWN, dtype=np.uint8)
+        grid[:, :40] = FREE
+        grid[:, 40] = OCCUPIED
+        self.assertEqual(wall_endings(grid, 0.2, grid == OCCUPIED), [])
+        grid[40, 20] = OCCUPIED
+        self.assertEqual(wall_endings(grid, 0.2, grid == OCCUPIED), [])
+        grid[:, :] = FREE
+        grid[20:40, 40] = OCCUPIED
+        self.assertEqual(wall_endings(grid, 0.2, grid == OCCUPIED), [])
+
+    def test_diagonal_wall_tip_is_detected_without_axis_assumption(self):
+        grid = np.full((80, 80), UNKNOWN, dtype=np.uint8)
+        yy, xx = np.indices(grid.shape)
+        grid[xx < yy] = FREE
+        for i in range(20, 41):
+            grid[i, i] = OCCUPIED
+        tips = wall_endings(grid, 0.1, grid == OCCUPIED)
+        self.assertEqual(len(tips), 2)
+        self.assertTrue(
+            all(abs(direction[0]) > 0.6 and abs(direction[1]) > 0.6 for _, direction, _ in tips)
+        )
+
+    def test_prefers_far_green_frontier_instead_of_small_nearby_steps(self):
+        snap = frontier_snapshot()
+        choice = choose_frontier(snap, [-2.0, 0.0])
+        self.assertGreater(abs(choice.goal[1]), 2.5)
+        self.assertGreater(choice.route_length_m, 3.0)
+        self.assertIn("Farthest unvisited", choice.selection_reason)
+
+    def test_actual_travel_history_changes_the_selected_direction(self):
+        snap = frontier_snapshot()
+        first = choose_frontier(snap, [-2.0, 0.0])
+        trail = np.linspace([-2.0, 0.0], first.goal, 50).tolist()
+        second = choose_frontier(snap, [-2.0, 0.0], trail=trail)
+        self.assertGreater(math.dist(first.goal, second.goal), 1.0)
+        self.assertGreaterEqual(second.history_distance_m, 0.75)
+        self.assertTrue(snap.safe[snap.model.cell(second.goal)])
+
+    def test_trail_records_measured_progress_and_ignores_stationary_updates(self):
+        session = ExplorationSession()
+        session.start(frontier_snapshot())
+        session.record_pose([-1.99, 0.0])
+        self.assertEqual(len(session.trail), 1)
+        session.record_pose([-1.7, 0.0])
+        self.assertEqual(session.trail[-1], [-1.7, 0.0])
+        session.cancel("Operator hold")
+        session.record_pose([-1.0, 0.0])
+        self.assertEqual(len(session.trail), 2)
+
+    def test_oversized_or_nonfinite_map_settings_are_rejected(self):
+        for settings in (
+            NavigationSettings(map_width_cells=1024, map_height_cells=1024),
+            NavigationSettings(map_origin_x_m=float("nan")),
+            NavigationSettings(yaw_rate_deg_s=100),
+            NavigationSettings(yaw_acceleration_deg_s2=200),
+        ):
+            with self.assertRaises(ValueError):
+                settings.validate()
+
     def test_frontiers_only_use_observed_free_not_start_prior_or_obstacles(self):
         grid = np.array([[OCCUPIED, FREE, UNKNOWN], [FREE, START_AREA, UNKNOWN]], dtype=np.uint8)
         edge = frontiers(grid)
         self.assertTrue(edge[0, 1])
         self.assertFalse(edge[1, 1])
         self.assertFalse(edge[0, 0])
+
+    def test_measures_actual_observations_and_travel_during_motion(self):
+        snap = frontier_snapshot()
+        session = ExplorationSession()
+        session.start(snap, continuous=True, simulation_s=10.0)
+        session.record_pose([-1.0, 0.0])
+        session.record_pose([-1.0, 1.0])
+        snap.model.grid[30:40, 60:70] = FREE
+        session.observe(snap, 15.0)
+        self.assertAlmostEqual(session.distance_flown_m, 2.0)
+        self.assertAlmostEqual(session.area_gain_m2, 1.0)
+        self.assertEqual(session.elapsed_s, 5.0)
+        self.assertEqual(session.reached, 0)
 
     def test_selects_reachable_known_viewpoint_instead_of_unknown_destination(self):
         snap = frontier_snapshot()
@@ -476,7 +1270,7 @@ class ExplorationTests(unittest.TestCase):
         self.assertEqual(modes[-1].timestamp, 0)
 
     def test_settings_enforce_sensor_stop_margin(self):
-        self.assertEqual(load_settings().cruise_m_s, 0.5)
+        self.assertEqual(load_settings().cruise_m_s, 1.0)
         with self.assertRaises(ValueError):
             NavigationSettings(stop_distance_m=0.5).validate()
 

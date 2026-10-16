@@ -1,6 +1,6 @@
 PX4 -> Isaac rotor physics bridge
 
-Current experiment and teaching guide (2026-10-14): TEACHER_GUIDE.txt.
+Current experiment and teaching guide (2026-10-14): README.md.
 It explains each terminal, the core files, clocks/frames, maze design, operation
 and measured evidence. Frontier exploration and the faster profile are prepared;
 see config/navigation_settings.json. Live exploration requires an operator
@@ -77,7 +77,8 @@ Launch order
    and the raw/effective gravity directions. The loader compiles the project
    files directly to bypass Kit's persistent import-code cache.
 6. Keep the drone disarmed for the initial read-only state check described in
-   docs/history/FLIGHT_NEXT.txt. The operator performs arming, takeoff and mode selection.
+   docs/history/FLIGHT_NEXT.txt. The operator requests arming/takeoff and mode selection
+   with the dashboard's explicit Flight setup buttons or the PX4 console.
    The upstream px4_ros_com offboard_control example automatically arms and
    commands a 5 m climb; it is not the next step for this room experiment.
 
@@ -193,7 +194,7 @@ PhysX/MAVLink evidence:
 results/20261005-105802/verified_result.json
 At that October 5 checkpoint, the user drone asset still required the scene
 setup above and had not been tested in the open scene. Later hover and mapped
-goal flight results are documented in TEACHER_GUIDE.txt and
+goal flight results are documented in README.md and
 docs/MAPPED_NAVIGATION.txt; this paragraph preserves the earlier checkpoint.
 
 References

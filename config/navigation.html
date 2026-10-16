@@ -63,10 +63,18 @@
         gap: 22px;
       }
       .map {
+        align-self: start;
         background: var(--panel);
         border: 1px solid var(--line);
         border-radius: 16px;
         padding: 18px;
+      }
+      .map-column {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        align-self: start;
       }
       canvas {
         width: 100%;
@@ -114,7 +122,12 @@
       #reason {
         font-size: 14px;
         line-height: 1.5;
-        min-height: 42px;
+        height: 64px;
+        overflow: auto;
+      }
+      #readiness {
+        height: 44px;
+        overflow: auto;
       }
       .buttons {
         display: grid;
@@ -139,6 +152,65 @@
       button:disabled {
         opacity: 0.35;
         cursor: not-allowed;
+      }
+      #action-status {
+        min-height: 64px;
+        margin-top: 12px;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      #action-status[data-status="rejected"],
+      #action-status[data-status="failed"],
+      #action-status[data-status="expired"] {
+        border-color: var(--obstacle);
+      }
+      #action-status[data-status="sending"],
+      #action-status[data-status="queued"],
+      #action-status[data-status="running"] {
+        border-color: var(--cyan);
+      }
+      .history-card {
+        min-width: 0;
+      }
+      .history-columns {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 20px;
+      }
+      .history-list {
+        max-height: 270px;
+        overflow: auto;
+        padding-left: 24px;
+        font-size: 13px;
+      }
+      .history-list li {
+        margin: 8px 0;
+      }
+      .history-list button {
+        padding: 3px 8px;
+        font-size: 12px;
+        margin-left: 6px;
+      }
+      .history-tools {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 12px;
+      }
+      #history-slider {
+        width: 100%;
+      }
+      #map-quality,
+      #review-status {
+        margin: 10px 0;
+        font-size: 13px;
+      }
+      @media (max-width: 760px) {
+        .history-columns {
+          grid-template-columns: 1fr;
+        }
       }
       .metric {
         display: flex;
@@ -213,36 +285,110 @@
         <div id="mode" class="tag">Connecting to live map</div>
       </header>
       <div class="layout">
-        <section class="map">
-          <canvas
-            id="map"
-            width="900"
-            height="900"
-            aria-label="Live overhead room map with drone, obstacles, and route. Click observed space to preview a destination."
-            >Live room map</canvas
-          >
-          <div class="legend">
-            <span><i class="swatch" style="background: var(--free)"></i>Observed space</span
-            ><span><i class="swatch" style="background: var(--obstacle)"></i>Obstacle</span
-            ><span><i class="swatch" style="background: var(--unknown)"></i>Unknown</span
-            ><span><i class="swatch" style="background: #34556d"></i>Known start area</span
-            ><span><i class="swatch" style="background: var(--margin)"></i>Clearance margin</span
-            ><span><i class="swatch" style="background: var(--cyan)"></i>Route</span
-            ><span><i class="swatch" style="background: #f0d670"></i>Frontier</span>
-          </div>
-        </section>
+        <div class="map-column">
+          <section class="map">
+            <p id="map-context" role="status">Live map · provisional observations</p>
+            <canvas
+              id="map"
+              width="900"
+              height="900"
+              aria-label="Live overhead room map with drone, obstacles, and route. Click observed space to preview a destination."
+              >Live room map</canvas
+            >
+            <div class="legend">
+              <span><i class="swatch" style="background: var(--free)"></i>Observed space</span
+              ><span><i class="swatch" style="background: var(--obstacle)"></i>Confirmed wall</span
+              ><span><i class="swatch" style="background: #e3af72"></i>Tentative obstacle</span
+              ><span><i class="swatch" style="background: var(--unknown)"></i>Unknown</span
+              ><span><i class="swatch" style="background: #34556d"></i>Known start area</span
+              ><span><i class="swatch" style="background: var(--margin)"></i>Clearance margin</span
+              ><span><i class="swatch" style="background: var(--cyan)"></i>Route</span
+              ><span><i class="swatch" style="background: #b1b8d1"></i>Actually flown</span
+              ><span><i class="swatch" style="background: #f0d670"></i>Frontier</span>
+            </div>
+          </section>
+          <section class="card history-card">
+            <h2>Map, travel and decision history</h2>
+            <p id="map-quality">
+              Provisional LiDAR map. A changing observation is not a confirmed wall.
+            </p>
+            <div class="history-tools">
+              <label
+                >Run
+                <select id="history-source">
+                  <option value="current">Current</option>
+                  <option value="previous">Previous reset run</option>
+                </select></label
+              >
+              <label><input id="show-trail" type="checkbox" checked /> Flown path</label>
+              <label><input id="show-targets" type="checkbox" checked /> Selected points</label>
+              <label><input id="show-rays" type="checkbox" /> LiDAR return endpoints</label>
+              <button id="live-view">Return to live map</button>
+              <a id="download-history" href="/api/history/download" download
+                >Download full map and decision log</a
+              >
+            </div>
+            <input
+              id="history-slider"
+              type="range"
+              min="0"
+              max="0"
+              value="0"
+              aria-label="Recorded map frame"
+            />
+            <p id="review-status">Live map. Select a recorded frame to review earlier decisions.</p>
+            <p id="frame-evidence" class="help"></p>
+            <div class="history-columns">
+              <div>
+                <h3>Selected points, including abandoned targets</h3>
+                <ol id="point-history" class="history-list"></ol>
+              </div>
+              <div>
+                <h3>Decisions and action responses</h3>
+                <ol id="decision-history" class="history-list"></ol>
+              </div>
+            </div>
+          </section>
+        </div>
         <aside class="side">
+          <section class="card">
+            <h2>Flight setup</h2>
+            <p id="flight-next" role="status" aria-live="polite">Connecting to flight telemetry…</p>
+            <p id="flight-mode" class="help">PX4 mode unavailable</p>
+            <div class="buttons">
+              <button id="takeoff" class="primary" disabled>Take off to 1 m</button>
+              <button id="offboard" disabled>Enable navigation</button>
+              <button id="land" disabled>Land here</button>
+            </div>
+            <p class="help">
+              Takeoff explicitly arms and climbs. Enable navigation hands the hover to PX4 Offboard.
+              Then select Explore. Reset finishes on the ground.
+            </p>
+            <p id="flight-action" class="help"></p>
+          </section>
           <section class="card">
             <h2>Navigation</h2>
             <div id="phase">Waiting</div>
             <p id="reason">Waiting for sensor data</p>
+            <p id="readiness" class="help"></p>
+            <label class="help"
+              ><input id="continuous" type="checkbox" checked /> Re-evaluate frontier targets while
+              flying</label
+            >
             <div class="buttons">
               <button id="go" class="primary" disabled>Navigate to destination</button
               ><button id="explore" disabled>Explore unseen space</button
+              ><button id="mission" disabled>Explore and land here</button
               ><button id="hold" disabled>Hold here / stop exploring</button
               ><button id="resume" disabled>Resume goal</button>
+              <button id="restart" disabled>Restart experiment</button>
             </div>
+            <p id="reset-status" class="help">
+              Restart restores the starting pose, clears the map and history, and leaves the drone
+              disarmed on the ground. Your maze edits are preserved.
+            </p>
             <div id="note">Click observed space to preview a route.</div>
+            <div id="action-status" role="status" aria-live="polite">No pending action.</div>
           </section>
           <section class="card">
             <h2>Measured state</h2>
@@ -260,6 +406,13 @@
               <span>Measured speed</span><span id="actual-speed" class="value">—</span>
             </div>
             <div class="metric"><span>Height</span><span id="height" class="value">—</span></div>
+            <div class="metric">
+              <span>Nose heading · from North</span><span id="yaw-measured">—</span>
+            </div>
+            <div class="metric">
+              <span>Commanded heading</span><span id="yaw-reference">—</span>
+            </div>
+            <p id="yaw-policy" class="help"></p>
             <div class="metric"><span>Map</span><span id="fresh">Waiting</span></div>
           </section>
           <section class="card">
@@ -272,6 +425,26 @@
             <div class="metric">
               <span>New observed area</span><span id="coverage">0.00 m²</span>
             </div>
+            <div class="metric"><span>Distance flown</span><span id="flown">0.00 m</span></div>
+            <div class="metric"><span>New area / distance</span><span id="area-per-m">—</span></div>
+            <div class="metric"><span>Simulation time</span><span id="elapsed">0.0 s</span></div>
+            <div class="metric">
+              <span>Target evaluations / switches</span><span id="switches">0 / 0</span>
+            </div>
+            <div class="metric">
+              <span>Current target potential</span><span id="potential">—</span>
+            </div>
+            <p id="reconsider-reason" class="help"></p>
+            <p id="corner-status" class="help"></p>
+          </section>
+          <section class="card">
+            <h2>Explore and land mission</h2>
+            <div id="mission-phase">Not started</div>
+            <p id="mission-reason" class="help">
+              Verify an enclosed observed map, save it, then ask PX4 to land here. Unknown
+              boundaries, sensing faults and experiment limits do not count as completion.
+            </p>
+            <div id="saved-map" class="help"></div>
           </section>
           <section class="card">
             <h2>Distance bands</h2>
@@ -284,113 +457,436 @@
             <p class="help">
               A fixed-height map from observed LiDAR rays and Isaac position. Unknown space stays
               excluded. The initial 0.6 m hover area is assumed clear and shown separately. Flight
-              mode and arming remain in the PX4 console.
+              control can be enabled with the explicit flight buttons above.
             </p>
           </section>
         </aside>
       </div>
     </main>
     <script>
-      const token = "__TOKEN__",
-        canvas = document.getElementById("map"),
+      let token = "__TOKEN__";
+      const canvas = document.getElementById("map"),
         ctx = canvas.getContext("2d");
       let state = null,
         selected = null,
-        localNote = "";
+        localNote = "",
+        resetArchive = null,
+        pendingRequest = null,
+        replayFrame = null,
+        replaySource = "current",
+        reviewPending = false,
+        renderedHistory = null,
+        previewSequence = 0,
+        replaySequence = 0;
       const byId = (id) => document.getElementById(id);
       const format = (v, suffix = "") => (Number.isFinite(v) ? v.toFixed(2) + suffix : "—");
+      const busyRequest = () =>
+        pendingRequest &&
+        ["sending", "received", "queued", "unconfirmed"].includes(pendingRequest.status);
+      const resetting = () =>
+        state?.experiment_reset?.busy ||
+        (pendingRequest?.action === "restart" &&
+          ["sending", "received", "queued", "running"].includes(pendingRequest.status));
+      const historyData = () =>
+        replaySource === "previous" ? state?.previous_history : state?.history;
+      function renderFeedback() {
+        if (!pendingRequest) return;
+        byId("action-status").dataset.status = pendingRequest.status;
+        byId("action-status").textContent =
+          pendingRequest.action + " · " + pendingRequest.status + " · " + pendingRequest.reason;
+      }
+      async function sendAction(action) {
+        if (action === "goal" && !selected) {
+          pendingRequest = {
+            action,
+            status: "rejected",
+            reason: "Select a destination on the live map first.",
+          };
+          renderFeedback();
+          return;
+        }
+        const id = crypto.randomUUID();
+        pendingRequest = { id, action, status: "sending", reason: "Sending request…" };
+        localNote = "";
+        if (action === "restart") {
+          ++replaySequence;
+          reviewPending = false;
+          replayFrame = null;
+          replaySource = "current";
+          selected = null;
+        }
+        update();
+        try {
+          const response = await post("/api/command", {
+            action,
+            request_id: id,
+            point: selected,
+            continuous: byId("continuous").checked,
+          });
+          if (pendingRequest?.id === id)
+            pendingRequest = response.command || {
+              id,
+              action,
+              status: "queued",
+              reason: "Waiting for controller acknowledgment",
+            };
+        } catch (error) {
+          if (pendingRequest?.id === id)
+            pendingRequest = {
+              id,
+              action,
+              status:
+                error.name === "AbortError" || error.requestUnconfirmed
+                  ? "unconfirmed"
+                  : "rejected",
+              reason:
+                error.name === "AbortError" || error.requestUnconfirmed
+                  ? "Command delivery unconfirmed. Checking request status; do not assume it ran. " +
+                    error.message
+                  : error.message,
+            };
+        }
+        update();
+        if (pendingRequest?.id === id && busyRequest())
+          setTimeout(() => refreshReceipt(id, 0), 100);
+      }
+      async function refreshReceipt(id, attempt) {
+        if (pendingRequest?.id !== id || !busyRequest()) return;
+        try {
+          const response = await fetch("/api/command-status?id=" + encodeURIComponent(id), {
+            signal: AbortSignal.timeout(1000),
+          });
+          const result = await response.json();
+          if (response.ok && result.command && pendingRequest?.id === id) {
+            pendingRequest = result.command;
+            renderFeedback();
+            // Full map polling remains separate from this small acknowledgment request.
+            update();
+          }
+        } catch {
+          // The regular state poll also reconciles receipts after transient failures.
+        }
+        if (pendingRequest?.id === id && busyRequest() && attempt < 20)
+          setTimeout(() => refreshReceipt(id, attempt + 1), 100);
+      }
+      async function reviewFrame(id) {
+        const sequence = ++replaySequence;
+        reviewPending = true;
+        byId("review-status").textContent = "Loading recorded map…";
+        try {
+          const response = await fetch(
+            "/api/frame?id=" + id + (replaySource === "previous" ? "&previous=1" : ""),
+          );
+          const frame = await response.json();
+          if (!response.ok) throw Error(frame.error);
+          if (sequence !== replaySequence) return;
+          replayFrame = frame;
+          byId("review-status").textContent =
+            "RECORDED MAP · " +
+            new Date(frame.utc).toLocaleTimeString() +
+            " · " +
+            frame.phase +
+            " · " +
+            frame.reason;
+          update();
+        } catch (error) {
+          byId("review-status").textContent = error.message;
+        } finally {
+          if (sequence === replaySequence) {
+            reviewPending = false;
+            update();
+          }
+        }
+      }
+      function renderHistory() {
+        const history = historyData();
+        const frames = history?.frames || [];
+        const ids = history?.frame_ids || frames.map((f) => f.id);
+        byId("history-slider").max = Math.max(0, ids.length - 1);
+        byId("history-slider").disabled = !ids.length;
+        if (!reviewPending)
+          byId("history-slider").value = replayFrame
+            ? Math.max(0, ids.indexOf(replayFrame.id))
+            : ids.length - 1;
+        byId("download-history").href =
+          "/api/history/download" + (replaySource === "previous" ? "?previous=1" : "");
+        byId("history-source").value = replaySource;
+        const view = replayFrame || state;
+        const changes = view?.cell_changes || frames.at(-1)?.cell_changes;
+        const footprint = replayFrame?.footprint || frames.at(-1)?.footprint;
+        byId("frame-evidence").textContent =
+          footprint && "body_observed" in footprint
+            ? "At the recorded drone position: observed body footprint " +
+              (footprint.body_observed ? "yes" : "no") +
+              "; preferred wall margin " +
+              (footprint.preferred_margin_met ? "met" : "not met") +
+              "; conservative wall clearance " +
+              format(footprint.wall_clearance_m, " m") +
+              "."
+            : "No footprint evidence in this frame.";
+        byId("map-quality").textContent =
+          "Provisional LiDAR map. " +
+          (view?.wall_policy
+            ? view.wall_policy.confirmed_cells +
+              " confirmed wall cells retained until Reset; " +
+              view.wall_policy.tentative_cells +
+              " tentative obstacle cells. Confirmation: " +
+              view.wall_policy.confirmation_scans +
+              " scans without an intervening free-only observation. "
+            : "") +
+          (changes
+            ? changes.free_to_occupied +
+              " free→wall and " +
+              changes.occupied_to_free +
+              " wall→free cells changed since the preceding recorded frame. "
+            : "") +
+          "These revisions may be new observations or sensor noise; they do not establish certainty.";
+        function renderList(id, rows, label) {
+          const root = byId(id);
+          root.replaceChildren();
+          for (const row of rows) {
+            const item = document.createElement("li");
+            item.textContent = new Date(row.utc).toLocaleTimeString() + " · " + label(row);
+            if (row.frame_id) {
+              const button = document.createElement("button");
+              button.textContent = "Map then";
+              button.onclick = () => reviewFrame(row.frame_id);
+              item.append(button);
+            }
+            root.append(item);
+          }
+        }
+        const version = replaySource + ":" + history?.run_id + ":" + history?.events?.at(-1)?.id;
+        if (version !== renderedHistory) {
+          renderedHistory = version;
+          renderList(
+            "point-history",
+            (history?.targets || []).slice(-100).reverse(),
+            (row) =>
+              "#" +
+              row.id +
+              " (" +
+              row.xy.map((n) => n.toFixed(1)).join(", ") +
+              ") · " +
+              row.status +
+              " · " +
+              row.reason,
+          );
+          renderList(
+            "decision-history",
+            (history?.events || []).slice(-80).reverse(),
+            (row) => (row.phase || row.kind) + " · " + row.reason,
+          );
+        }
+        if (history?.error || history?.dropped_records)
+          byId("map-quality").textContent +=
+            " Recording issue: " + (history.error || history.dropped_records + " records dropped");
+      }
       async function post(url, data) {
-        const r = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Navigation-Token": token,
-          },
-          body: JSON.stringify(data),
-        });
-        const result = await r.json();
-        if (!r.ok) throw Error(result.error);
-        return result;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        try {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            let r, result;
+            try {
+              r = await fetch(url, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Navigation-Token": token,
+                },
+                body: JSON.stringify(data),
+                signal: controller.signal,
+              });
+              result = await r.json();
+            } catch (error) {
+              error.requestUnconfirmed = true;
+              throw error;
+            }
+            if (r.ok) return result;
+            if (
+              r.status === 403 &&
+              attempt === 0 &&
+              (result.code === "session_expired" || result.error === "Use this navigator window")
+            ) {
+              localNote = "Navigator restarted; reconnecting this page session…";
+              byId("note").textContent = localNote;
+              const page = await fetch("/", { cache: "no-store", signal: controller.signal });
+              if (!page.ok) throw Error("Cannot reconnect; refresh the dashboard");
+              const match = (await page.text()).match(/(?:const|let) token = "([A-Za-z0-9_-]+)"/);
+              if (!match || match[1] === token)
+                throw Error(
+                  "Page authentication failed; reopen this dashboard at http://127.0.0.1:8787/",
+                );
+              token = match[1];
+              // A 403 was rejected before queueing. Retry only once, retaining
+              // the same request ID; never retry uncertain network failures.
+              localNote = "Page session reconnected";
+              continue;
+            }
+            throw Error(result.error);
+          }
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+      function projection() {
+        const view = replayFrame || state;
+        const width = view.width || view.size,
+          height = view.height || view.size,
+          cell = 820 / width;
+        return { width, height, cell, left: 40, top: 40, bottom: 40 + height * cell };
       }
       function screen(xy) {
-        const n = state.size,
-          r = state.resolution,
-          o = state.origin;
-        return [40 + ((xy[0] - o[0]) / (n * r)) * 820, 860 - ((xy[1] - o[1]) / (n * r)) * 820];
+        const p = projection(),
+          r = (replayFrame || state).resolution,
+          o = (replayFrame || state).origin;
+        return [p.left + ((xy[0] - o[0]) / r) * p.cell, p.bottom - ((xy[1] - o[1]) / r) * p.cell];
       }
-      function route(points, dashed) {
+      function axisStep(span) {
+        const power = 10 ** Math.floor(Math.log10(span / 6)),
+          fraction = span / 6 / power;
+        return power * (fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10);
+      }
+      function route(points, dashed, color = "#58d6e6") {
         if (!points || points.length < 2) return;
         ctx.beginPath();
         points.forEach((p, i) => {
           const a = screen(p);
           i ? ctx.lineTo(...a) : ctx.moveTo(...a);
         });
-        ctx.strokeStyle = "#58d6e6";
+        ctx.strokeStyle = color;
         ctx.lineWidth = dashed ? 3 : 5;
         ctx.setLineDash(dashed ? [10, 8] : []);
         ctx.stroke();
         ctx.setLineDash([]);
       }
       function draw() {
+        const view = replayFrame || state;
+        if (view?.grid) {
+          const p = projection(),
+            height = Math.round(p.bottom + 40);
+          if (canvas.height !== height) canvas.height = height;
+          canvas.style.aspectRatio = canvas.width + "/" + canvas.height;
+        }
         ctx.fillStyle = "#1b2631";
-        ctx.fillRect(0, 0, 900, 900);
-        if (!state || !state.grid) {
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        if ((!replayFrame && (resetting() || replaySource === "previous")) || !view || !view.grid) {
           ctx.fillStyle = "#afbfcc";
           ctx.font = "18px system-ui";
           ctx.textAlign = "center";
-          ctx.fillText("Waiting for live LiDAR and transforms", 450, 450);
+          ctx.fillText(
+            resetting()
+              ? "Reset in progress — previous run is being archived"
+              : replaySource === "previous"
+                ? "Select a recorded map from the previous run"
+                : "Waiting for live LiDAR and transforms",
+            450,
+            canvas.height / 2,
+          );
           return;
         }
-        const n = state.size,
-          cell = 820 / n;
-        for (let y = 0; y < n; y++)
-          for (let x = 0; x < n; x++) {
-            const i = y * n + x,
-              k = state.grid[i];
+        const p = projection(),
+          width = p.width,
+          height = p.height,
+          cell = p.cell;
+        for (let y = 0; y < height; y++)
+          for (let x = 0; x < width; x++) {
+            const i = y * width + x,
+              k = view.grid[i];
             ctx.fillStyle =
               k === "#"
-                ? "#f27564"
+                ? view.confirmed_walls?.[i] === "1"
+                  ? "#f27564"
+                  : "#e3af72"
                 : k === "?"
                   ? "#26323f"
-                  : state.safe[i] === "1"
+                  : view.safe[i] === "1"
                     ? k === "b"
                       ? "#34556d"
                       : "#21443e"
                     : "#735f3b";
-            ctx.fillRect(40 + x * cell, 40 + (n - 1 - y) * cell, cell + 0.2, cell + 0.2);
+            ctx.fillRect(
+              p.left + x * cell,
+              p.top + (height - 1 - y) * cell,
+              cell + 0.2,
+              cell + 0.2,
+            );
           }
         ctx.fillStyle = "#f0d670";
-        for (let y = 1; y < n - 1; y++)
-          for (let x = 1; x < n - 1; x++) {
-            const i = y * n + x;
+        for (let y = 1; y < height - 1; y++)
+          for (let x = 1; x < width - 1; x++) {
+            const i = y * width + x;
             if (
-              state.grid[i] === "." &&
-              [i - 1, i + 1, i - n, i + n].some((j) => state.grid[j] === "?")
+              view.grid[i] === "." &&
+              [i - 1, i + 1, i - width, i + width].some((j) => view.grid[j] === "?")
             )
               ctx.fillRect(
                 40 + (x + 0.3) * cell,
-                40 + (n - y - 0.7) * cell,
+                p.top + (height - y - 0.7) * cell,
                 Math.max(2, cell * 0.4),
                 Math.max(2, cell * 0.4),
               );
           }
         ctx.strokeStyle = "#657582";
         ctx.lineWidth = 1;
-        ctx.strokeRect(40, 40, 820, 820);
+        ctx.strokeRect(p.left, p.top, width * cell, height * cell);
         ctx.fillStyle = "#afbfcc";
         ctx.font = "14px system-ui";
         ctx.textAlign = "center";
-        for (let v = -6; v <= 6; v += 2) {
-          let a = screen([v, -6]);
-          ctx.fillText(v + " m", a[0], 884);
-          a = screen([-6, v]);
+        const min = view.origin,
+          max = [min[0] + width * view.resolution, min[1] + height * view.resolution];
+        const xStep = axisStep(max[0] - min[0]),
+          yStep = axisStep(max[1] - min[1]);
+        for (let v = Math.ceil(min[0] / xStep) * xStep; v <= max[0]; v += xStep) {
+          const a = screen([v, min[1]]);
+          ctx.fillText(v + " m", a[0], p.bottom + 24);
+        }
+        for (let v = Math.ceil(min[1] / yStep) * yStep; v <= max[1]; v += yStep) {
+          const a = screen([min[0], v]);
           ctx.textAlign = "right";
           ctx.fillText(v, a[0] - 8, a[1] + 5);
           ctx.textAlign = "center";
         }
-        route(state.preview, true);
-        route(state.path, false);
-        const point = state.goal || selected || state.preview_goal;
+        if (byId("show-trail").checked)
+          route(replayFrame ? view.trail : historyData()?.trail || view.trail, false, "#b1b8d1");
+        if (byId("show-targets").checked)
+          for (const target of historyData()?.targets || []) {
+            if (replayFrame && target.utc > replayFrame.utc) continue;
+            const a = screen(target.xy);
+            ctx.fillStyle = target.status === "reached" ? "#7de2ad" : "#d7a6ed";
+            ctx.beginPath();
+            ctx.arc(...a, 4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        for (const visited of view.visited_viewpoints || []) {
+          const a = screen(visited);
+          ctx.strokeStyle = "#b1b8d1";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(...a, 5, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        if (byId("show-rays").checked)
+          for (const hit of view.hit_endpoints_xy || []) {
+            const a = screen(hit);
+            ctx.fillStyle = "#ffa78d";
+            ctx.fillRect(a[0] - 1, a[1] - 1, 2, 2);
+          }
+        route(view.preview, true);
+        route(view.path, false);
+        for (const tip of view.exploration?.wall_endings_xy || []) {
+          const a = screen(tip);
+          ctx.strokeStyle = "#f3be6f";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(a[0] - 5, a[1] - 5, 10, 10);
+        }
+        if (view.exploration?.corner_xy) {
+          const a = screen(view.exploration.corner_xy);
+          ctx.fillStyle = "#f3be6f";
+          ctx.fillText("Look around", a[0], a[1] - 12);
+        }
+        const point = replayFrame ? view.goal : view.goal || selected || view.preview_goal;
         if (point) {
           const a = screen(point);
           ctx.strokeStyle = "#58d6e6";
@@ -405,11 +901,11 @@
           ctx.lineTo(a[0], a[1] + 17);
           ctx.stroke();
         }
-        if (state.pose) {
-          const a = screen(state.pose);
+        if (view.pose) {
+          const a = screen(view.pose);
           ctx.save();
           ctx.translate(...a);
-          ctx.rotate(-state.pose[2]);
+          ctx.rotate(-view.pose[2]);
           ctx.fillStyle = "#edf4fa";
           ctx.beginPath();
           ctx.moveTo(16, 0);
@@ -426,11 +922,52 @@
         }
       }
       function update() {
+        if (!state) {
+          renderFeedback();
+          return;
+        }
+        const acknowledged = (state.commands || []).find((item) => item.id === pendingRequest?.id);
+        if (
+          acknowledged &&
+          (!pendingRequest.utc || !acknowledged.utc || acknowledged.utc >= pendingRequest.utc)
+        )
+          pendingRequest = acknowledged;
+        renderFeedback();
+        byId("map-context").textContent = resetting()
+          ? "Reset requested · physical reset steps are in progress"
+          : replayFrame
+            ? "RECORDED MAP · " + new Date(replayFrame.utc).toLocaleString()
+            : replaySource === "previous"
+              ? "PREVIOUS RUN · no recorded map selected"
+              : "LIVE MAP · provisional LiDAR observations";
+        const reset = state.experiment_reset;
+        const flight = state.flight;
+        const flightBusy = !!state.flight_controls?.busy;
+        byId("flight-next").textContent =
+          flight?.next_step || "Waiting for the controller's flight setup status";
+        byId("flight-mode").textContent = flight
+          ? "PX4: " + flight.mode + " · " + (flight.armed ? "Armed" : "Disarmed")
+          : "PX4 mode unavailable";
+        byId("flight-action").textContent = state.flight_controls
+          ? state.flight_controls.phase + " · " + state.flight_controls.reason
+          : "";
+        const flightLocked =
+          !state.control_enabled || !state.flight_controls || busyRequest() || resetting();
+        byId("takeoff").disabled =
+          flightLocked || flightBusy || !!replayFrame || replaySource === "previous";
+        byId("offboard").disabled =
+          flightLocked || flightBusy || !!replayFrame || replaySource === "previous";
+        byId("land").disabled = flightLocked;
+        const groundAfterReset =
+          reset?.phase === "READY" && !state.map_fresh && state.observed_cells === 0;
         byId("mode").textContent = state.control_enabled
-          ? "Goal controller · PX4 mode selected separately"
+          ? "Goal controller · use Flight setup to prepare navigation"
           : "Map preview · flight controls disabled";
-        byId("phase").textContent = state.phase || "Waiting";
-        byId("reason").textContent = state.reason || state.map_reason;
+        byId("phase").textContent = groundAfterReset ? "GROUND" : state.phase || "Waiting";
+        byId("reason").textContent = groundAfterReset
+          ? "Reset complete. Disarmed on the ground; mapping resumes at the 1 m hover."
+          : state.reason || state.map_reason;
+        byId("readiness").textContent = state.readiness_reason || "";
         byId("goal").textContent =
           selected || state.goal || state.preview_goal
             ? (selected || state.goal || state.preview_goal).map((v) => v.toFixed(1)).join(", ") +
@@ -440,18 +977,72 @@
         byId("distance").textContent = format(state.clearance_m, " m");
         byId("speed").textContent = format(state.speed_m_s || 0, " m/s");
         byId("height").textContent = format(state.height_m, " m");
+        const heading = (radians) =>
+          Number.isFinite(radians)
+            ? (((((radians * 180) / Math.PI) % 360) + 360) % 360).toFixed(1) + "°"
+            : "—";
+        byId("yaw-measured").textContent = heading(state.yaw_measured_ned_rad);
+        byId("yaw-reference").textContent = heading(state.yaw_reference_ned_rad);
+        byId("yaw-policy").textContent =
+          state.yaw_mode === "face_route_smoothly"
+            ? "Faces the route smoothly · up to " +
+              state.settings.yaw_rate_deg_s +
+              "°/s; holds heading when stopped."
+            : "Running controller holds a fixed heading.";
         byId("actual-speed").textContent = format(state.measured_speed_m_s, " m/s");
         byId("fresh").textContent = state.map_fresh
           ? "Live · " + state.scans + " scans"
-          : "Unavailable";
+          : groundAfterReset
+            ? "Cleared · waiting for hover"
+            : "Unavailable";
         byId("note").textContent = localNote || state.note || "";
+        byId("restart").disabled = !reset || reset.busy || busyRequest() || resetting();
+        byId("reset-status").textContent = reset
+          ? reset.phase + " · " + reset.reason
+          : "Restart requires the updated controller.";
+        if (reset?.phase === "READY" && reset.archive !== resetArchive) {
+          resetArchive = reset.archive;
+          selected = null;
+          localNote = "Reset complete. The drone is on the ground and disarmed.";
+        }
         byId("go").disabled =
-          !state.control_enabled || !state.ready || !selected || !state.map_fresh;
-        byId("hold").disabled = !state.control_enabled;
+          !state.control_enabled ||
+          flightBusy ||
+          busyRequest() ||
+          resetting() ||
+          reviewPending ||
+          !!replayFrame ||
+          replaySource === "previous";
+        byId("hold").disabled = !state.control_enabled || resetting();
         byId("explore").disabled =
-          !state.control_enabled || !state.ready || !state.map_fresh || !state.exploration;
+          !state.control_enabled ||
+          flightBusy ||
+          busyRequest() ||
+          resetting() ||
+          reviewPending ||
+          !!replayFrame ||
+          replaySource === "previous";
+        byId("mission").disabled =
+          !state.control_enabled ||
+          flightBusy ||
+          busyRequest() ||
+          resetting() ||
+          reviewPending ||
+          !!replayFrame ||
+          replaySource === "previous";
+        const mission = state.mission;
+        byId("mission-phase").textContent = mission?.phase || "Unavailable in this controller";
+        byId("mission-reason").textContent =
+          mission?.reason || "Mission requires updated controller";
+        byId("saved-map").textContent = mission?.saved_map ? "Saved map: " + mission.saved_map : "";
         byId("resume").disabled =
-          !state.control_enabled || state.phase !== "PAUSED" || !state.map_fresh;
+          !state.control_enabled ||
+          flightBusy ||
+          busyRequest() ||
+          resetting() ||
+          reviewPending ||
+          !!replayFrame ||
+          replaySource === "previous";
         const exp = state.exploration;
         byId("exploration-phase").textContent =
           exp?.phase || (state.control_enabled ? "Requires updated controller" : "Preview only");
@@ -462,14 +1053,26 @@
             : "Exploration is available in the flight controller. This preview sends no flight targets.");
         byId("viewpoints").textContent = exp?.viewpoints_reached || 0;
         byId("coverage").textContent = format(exp?.new_observed_area_m2 || 0, " m²");
+        byId("flown").textContent = format(exp?.distance_flown_m || 0, " m");
+        byId("area-per-m").textContent = format(exp?.observed_area_per_m, " m²/m");
+        byId("elapsed").textContent = format(exp?.elapsed_simulation_s || 0, " s");
+        byId("switches").textContent =
+          (exp?.reconsiderations || 0) + " / " + (exp?.target_switches || 0);
+        byId("potential").textContent = format(exp?.current_target_gain_m2, " m²");
+        byId("reconsider-reason").textContent = exp?.reconsider_reason || "";
+        byId("corner-status").textContent = exp?.policy
+          ? exp.corner_xy
+            ? "Wall-ending viewpoint · estimated hidden area " +
+              format(exp.hidden_area_m2, " m²") +
+              ". Amber square marks the wall, not a flight destination."
+            : "Corner-aware: no useful reachable wall-ending view selected; using an ordinary frontier."
+          : "Corner-aware exploration requires the updated navigator.";
         if (state.settings) {
           const s = state.settings;
           byId("bands").textContent =
-            "Above " +
-            s.slow_distance_m +
-            " m: up to " +
+            "Clear straight route: up to " +
             s.cruise_m_s +
-            " m/s. " +
+            " m/s, with braking before obstacles, bends and goals. " +
             s.slow_distance_m +
             "–" +
             s.stop_distance_m +
@@ -477,22 +1080,35 @@
             s.stop_distance_m +
             " m: hold / replan. Obstacle margin: " +
             s.obstacle_margin_m +
-            " m.";
+            " m. Full cruise needs about " +
+            (
+              s.stop_distance_m +
+              s.cruise_m_s * s.braking_reaction_s +
+              s.cruise_m_s ** 2 / (2 * s.acceleration_m_s2)
+            ).toFixed(2) +
+            " m of forward obstacle clearance. Green indicates mapped traversable space, not a guaranteed speed.";
         }
+        renderHistory();
         draw();
       }
       canvas.addEventListener("click", async (e) => {
-        if (!state?.map_fresh) return;
+        if (!state?.map_fresh || replayFrame || replaySource === "previous" || resetting()) return;
         const b = canvas.getBoundingClientRect(),
           x = ((e.clientX - b.left) / b.width) * 900,
-          y = ((e.clientY - b.top) / b.height) * 900;
-        if (x < 40 || x > 860 || y < 40 || y > 860) return;
+          y = ((e.clientY - b.top) / b.height) * canvas.height;
+        const p = projection();
+        if (x < p.left || x >= p.left + p.width * p.cell || y < p.top || y >= p.bottom) return;
         const point = [
-          state.origin[0] + ((x - 40) / 820) * state.size * state.resolution,
-          state.origin[1] + ((860 - y) / 820) * state.size * state.resolution,
+          state.origin[0] + ((x - p.left) / p.cell) * state.resolution,
+          state.origin[1] + ((p.bottom - y) / p.cell) * state.resolution,
         ];
+        const sequence = ++previewSequence;
+        selected = null;
+        localNote = "Calculating route preview…";
+        update();
         try {
           await post("/api/preview", { point });
+          if (sequence !== previewSequence) return;
           selected = point;
           localNote =
             "Route preview ready. " +
@@ -500,38 +1116,53 @@
               ? "Navigate when ready."
               : "Flight controls are disabled in this preview.");
         } catch (err) {
+          if (sequence !== previewSequence) return;
           selected = null;
           localNote = err.message;
         }
         update();
       });
-      byId("go").onclick = async () => {
-        try {
-          await post("/api/command", { action: "goal", point: selected });
-          localNote = "Goal sent to the controller";
-        } catch (err) {
-          localNote = err.message;
-        }
+      for (const id of [
+        "go",
+        "restart",
+        "hold",
+        "resume",
+        "explore",
+        "mission",
+        "takeoff",
+        "offboard",
+        "land",
+      ])
+        byId(id).onclick = () => sendAction(id === "go" ? "goal" : id);
+      byId("live-view").onclick = () => {
+        ++replaySequence;
+        reviewPending = false;
+        replayFrame = null;
+        replaySource = "current";
+        byId("review-status").textContent = "Live map";
         update();
       };
-      for (const name of ["hold", "resume", "explore"])
-        byId(name).onclick = async () => {
-          try {
-            await post("/api/command", { action: name });
-            localNote =
-              name === "hold"
-                ? "Hold requested; exploration cancelled"
-                : name === "explore"
-                  ? "Exploration requested; the navigator will choose successive viewpoints"
-                  : "Resume requested";
-          } catch (err) {
-            localNote = err.message;
-          }
+      byId("show-trail").onchange = draw;
+      byId("show-targets").onchange = draw;
+      byId("show-rays").onchange = draw;
+      byId("history-source").onchange = () => {
+        replaySource = byId("history-source").value;
+        replayFrame = null;
+        const ids = historyData()?.frame_ids || [];
+        if (ids.length) reviewFrame(ids.at(-1));
+        else {
+          byId("review-status").textContent = "No recorded map in this run yet";
           update();
-        };
+        }
+      };
+      byId("history-slider").oninput = () => {
+        const ids = historyData()?.frame_ids || [];
+        const id = ids[Number(byId("history-slider").value)];
+        if (id) reviewFrame(id);
+      };
       async function poll() {
         try {
-          const r = await fetch("/api/state");
+          const r = await fetch("/api/state", { signal: AbortSignal.timeout(3000) });
           state = await r.json();
           update();
         } catch {
@@ -540,6 +1171,11 @@
           byId("hold").disabled = true;
           byId("resume").disabled = true;
           byId("explore").disabled = true;
+          byId("mission").disabled = true;
+          byId("restart").disabled = true;
+          byId("takeoff").disabled = true;
+          byId("offboard").disabled = true;
+          byId("land").disabled = true;
         }
         setTimeout(poll, 500);
       }

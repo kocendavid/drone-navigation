@@ -133,6 +133,41 @@ def reachable_mask(snapshot, start_xy):
     return connected
 
 
+def route_distances(snapshot, start_xy):
+    """Shortest grid travel distance through known safe space from the vehicle."""
+    model = snapshot.model
+    start = model.cell(start_xy)
+    if not model.inside(start):
+        raise ValueError("Current position is outside the map")
+    escape = escape_start(snapshot, start)
+    distances = np.full(model.grid.shape, np.inf)
+    initial = sum(math.dist(a, b) for a, b in zip(escape, escape[1:])) * model.resolution
+    distances[escape[-1]] = initial
+    queue = [(initial, escape[-1])]
+    while queue:
+        cost, cell = heapq.heappop(queue)
+        if cost != distances[cell]:
+            continue
+        for dy, dx, step in NEIGHBOURS:
+            other = (cell[0] + dy, cell[1] + dx)
+            if not model.inside(other) or not snapshot.safe[other]:
+                continue
+            if (
+                dy
+                and dx
+                and (
+                    not snapshot.safe[cell[0] + dy, cell[1]]
+                    or not snapshot.safe[cell[0], cell[1] + dx]
+                )
+            ):
+                continue
+            new = cost + step * model.resolution
+            if new < distances[other]:
+                distances[other] = new
+                heapq.heappush(queue, (new, other))
+    return distances
+
+
 def plan(snapshot, start_xy, goal_xy):
     model = snapshot.model
     start, goal = model.cell(start_xy), model.cell(goal_xy)

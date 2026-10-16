@@ -12,6 +12,7 @@ import time
 import uuid
 import numpy as np
 from .mapping import RayMap
+from .settings import NavigationSettings
 
 
 @dataclass
@@ -42,7 +43,12 @@ class MapSnapshot:
 
 
 class MapFeed:
-    def __init__(self, floor_z=-0.76965, near_range=0.5, obstacle_margin=0.8, body_radius=0.3):
+    def __init__(
+        self, floor_z=-0.76965, near_range=0.5, obstacle_margin=0.8, body_radius=0.3, settings=None
+    ):
+        self.settings = settings or NavigationSettings(
+            near_range_m=near_range, obstacle_margin_m=obstacle_margin, body_radius_m=body_radius
+        )
         self.floor_z = floor_z
         self.obstacle_margin = obstacle_margin
         self.body_radius = body_radius
@@ -71,6 +77,16 @@ class MapFeed:
                 str(floor_z),
                 "--near-range",
                 str(near_range),
+                "--map-resolution",
+                str(self.settings.map_resolution_m),
+                "--map-width",
+                str(self.settings.map_width_cells),
+                "--map-height",
+                str(self.settings.map_height_cells),
+                "--map-origin-x",
+                str(self.settings.map_origin_x_m),
+                "--map-origin-y",
+                str(self.settings.map_origin_y_m),
             ],
             stdout=subprocess.PIPE,
             text=True,
@@ -100,13 +116,18 @@ class MapFeed:
                 generated = float(item["generated_monotonic_s"])
                 if not math.isfinite(generated) or not 0 <= now - generated <= 0.7:
                     raise ValueError("Buffered/future map record")
-                size = item["size"]
+                width, height = item["width"], item["height"]
                 origin = item["origin"]
                 resolution = float(item["resolution"])
-                if size != 120 or resolution != 0.1 or len(origin) != 2 or origin != [-6.0, -6.0]:
+                if (
+                    width != self.settings.map_width_cells
+                    or height != self.settings.map_height_cells
+                    or resolution != self.settings.map_resolution_m
+                    or origin != [self.settings.map_origin_x_m, self.settings.map_origin_y_m]
+                ):
                     raise ValueError("Unexpected map geometry")
                 chars = item["grid"]
-                if len(chars) != size * size or set(chars) - set("?.#b"):
+                if len(chars) != width * height or set(chars) - set("?.#b"):
                     raise ValueError("Invalid map cells")
                 old = self.snapshot
                 if old is not None and item["scans"] == old.scans:
@@ -117,10 +138,16 @@ class MapFeed:
                         old.safe,
                     )
                 else:
-                    model = RayMap(body_radius=self.body_radius, clearance=self.obstacle_margin)
+                    model = RayMap(**self.settings.map_options())
                     model.grid = np.array(
                         [{"?": 0, ".": 1, "#": 2, "b": 3}[c] for c in chars], dtype=np.uint8
-                    ).reshape(size, size)
+                    ).reshape(height, width)
+                    confirmed = item.get("confirmed_walls", "0" * (width * height))
+                    if len(confirmed) != width * height or set(confirmed) - set("01"):
+                        raise ValueError("Invalid wall confirmation mask")
+                    model.confirmed_walls = np.array(list(confirmed)).reshape(height, width) == "1"
+                    if np.any(model.confirmed_walls & (model.grid != 2)):
+                        raise ValueError("Confirmed walls must remain occupied")
                     clearance, body_free, safe = model.geometry()
                 valid = item["fresh"] is True
                 stamp = item["stamp_ns"]
