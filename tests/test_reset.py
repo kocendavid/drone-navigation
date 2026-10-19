@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from navigation.dashboard import Dashboard
 from navigation.mapping import RayMap, FREE
-from navigation.reset import ExperimentReset, ResetBackend
+from navigation.reset import ExperimentReset, ResetBackend, local_ground_ready
 from queue import Queue
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -65,6 +65,30 @@ def snapshot():
 
 
 class ResetTests(unittest.TestCase):
+    def test_reset_requires_stationary_valid_px4_estimate_not_just_disarmed_contact(self):
+        good = "\n".join(
+            "    " + row
+            for row in (
+                "xy_valid: True",
+                "z_valid: True",
+                "v_xy_valid: True",
+                "v_z_valid: True",
+                "z: 0.01",
+                "vx: 0.02",
+                "vy: -0.01",
+                "vz: 0.01",
+            )
+        )
+        self.assertTrue(local_ground_ready(good))
+        for old, new in (
+            ("vx: 0.02", "vx: 24"),
+            ("z: 0.01", "z: 2.5"),
+            ("v_xy_valid: True", "v_xy_valid: False"),
+            ("vz: 0.01", "vz: nan"),
+        ):
+            self.assertFalse(local_ground_ready(good.replace(old, new)))
+        self.assertFalse(local_ground_ready(""))
+
     def test_reset_requests_hold_before_a_slow_or_failed_isaac_inspection(self):
         with tempfile.TemporaryDirectory() as folder:
             backend = FakeBackend()
@@ -116,7 +140,7 @@ class ResetTests(unittest.TestCase):
                     "load_bridge",
                 ],
             )
-            self.assertEqual(backend.calls.count("ground_ready"), 5)
+            self.assertEqual(backend.calls.count("ground_ready"), 12)
             self.assertEqual(reset.report()["phase"], "READY")
             self.assertFalse(reset.report()["busy"])
             baseline = json.loads((Path(folder) / "logs/experiment_baseline.json").read_text())
@@ -148,27 +172,35 @@ class ResetTests(unittest.TestCase):
             self.assertNotIn("play", backend.calls)
             self.assertEqual(reset.report()["phase"], "FAILED")
 
-    def test_changed_starting_pose_is_not_silently_accepted_as_same_experiment(self):
+    def test_scene_placement_supersedes_saved_pose_and_preserves_previous_baseline(self):
         with tempfile.TemporaryDirectory() as folder:
             logs = Path(folder) / "logs"
             logs.mkdir()
             (logs / "experiment_baseline.json").write_text(
                 json.dumps(
                     dict(
-                        scene="test.usd",
+                        scene="previous-scene.usd",
                         start_xyz=[0.0, 0.0, 0.0],
                     )
                 )
             )
             backend = FakeBackend()
             reset = ExperimentReset(backend, folder)
-            reset.start(None, {})
-            self.assertTrue(reset.quiesce.wait(2))
-            reset.released.set()
-            self.assertTrue(reset.done.wait(2))
-            self.assertFalse(reset.success)
-            self.assertIn("starting pose changed", reset.report()["reason"])
-            self.assertNotIn(("start", "px4"), backend.calls)
+            with patch("navigation.reset.time.sleep"):
+                reset.start(None, {})
+                self.assertTrue(reset.quiesce.wait(2))
+                reset.released.set()
+                self.assertTrue(reset.done.wait(2))
+            self.assertTrue(reset.success, reset.report())
+            current = json.loads((logs / "experiment_baseline.json").read_text())
+            self.assertEqual(current["scene"], "test.usd")
+            self.assertEqual(current["start_xyz"], [-28.0, -17.0, -3.55])
+            self.assertEqual(current["source"], "scene_placement")
+            previous = json.loads(
+                (Path(reset.report()["archive"]) / "previous_baseline.json").read_text()
+            )
+            self.assertEqual(previous["scene"], "previous-scene.usd")
+            self.assertEqual(previous["start_xyz"], [0.0, 0.0, 0.0])
 
     def test_backend_rejects_sih_before_requesting_any_mode_change(self):
         backend = ResetBackend()

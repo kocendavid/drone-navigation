@@ -2,18 +2,20 @@
 
 import copy
 import json
+import runpy
 import time
 from pathlib import Path
 import numpy as np
 from .model import RotorModel, SensorModel, rotation_wxyz, resolve_gravity_direction
 from .transport import SimulatorTransport, wsl_address
+from .mass import configured_link_masses
 
 
 class IsaacPX4Bridge:
     def __init__(self, config_path):
         import omni.usd
         import omni.timeline
-        from pxr import UsdGeom, UsdPhysics
+        from pxr import Usd, UsdGeom, UsdPhysics
         from isaacsim.core.simulation_manager import SimulationManager, SimulationEvent
 
         self.config_path = Path(config_path)
@@ -37,6 +39,44 @@ class IsaacPX4Bridge:
             )
         if UsdPhysics.RigidBodyAPI(body).GetKinematicEnabledAttr().Get():
             raise RuntimeError("Disable Kinematic Enabled on the chassis.")
+        if self.config.get("rigid_frame", False):
+            joints = [
+                p
+                for p in Usd.PrimRange(
+                    self.stage.GetPrimAtPath(self.config["vehicle_root_prim_path"])
+                )
+                if p.IsA(UsdPhysics.Joint)
+            ]
+            if len(joints) != 8:
+                raise RuntimeError("Rigid frame expects the quadcopter's eight arm/rotor joints")
+            with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
+                for joint in joints:
+                    joint.SetTypeName("PhysicsFixedJoint")
+            print(
+                "[PX4 bridge] Rigid frame: eight fixed joints; rotor spin remains in the motor model",
+                flush=True,
+            )
+        overrides = configured_link_masses(self.config)
+        if overrides:
+            links = {
+                str(p.GetPath()): p
+                for p in Usd.PrimRange(
+                    self.stage.GetPrimAtPath(self.config["vehicle_root_prim_path"])
+                )
+                if p.HasAPI(UsdPhysics.RigidBodyAPI)
+            }
+            if set(links) != set(overrides):
+                raise RuntimeError("Mass configuration must cover every vehicle rigid link exactly")
+            # Session overrides do not overwrite the user's scene or source asset.
+            with Usd.EditContext(self.stage, self.stage.GetSessionLayer()):
+                for path, value in overrides.items():
+                    api = UsdPhysics.MassAPI.Apply(links[path])
+                    api.CreateMassAttr(float(value))
+                    api.CreateDiagonalInertiaAttr((0.0, 0.0, 0.0))
+            print(
+                f"[PX4 bridge] Applied session link masses: {sum(overrides.values()):.6f} kg total",
+                flush=True,
+            )
         scene = self.stage.GetPrimAtPath(self.config["physics_scene_path"])
         if not scene or not scene.IsA(UsdPhysics.Scene):
             raise RuntimeError("Set physics_scene_path to the scene PhysicsScene prim.")
@@ -85,6 +125,13 @@ class IsaacPX4Bridge:
         self.time_us = 1000000
         self.next_gps_us = 0
         self.last_log_wall = 0.0
+        # Kit can retain old imported Python modules across bridge reloads.
+        # Read this observational adapter directly, like the bridge bootstrap.
+        diagnostic_source = runpy.run_path(
+            str(self.config_path.parent / "navigation" / "diagnostic_wire.py")
+        )
+        self.diagnostics = diagnostic_source["DiagnosticEmitter"]("isaac_bridge")
+        self.last_truth_us = 0
         self.last_position = None
         self.force = np.zeros(3)
         self.torque = np.zeros(3)
@@ -123,14 +170,15 @@ class IsaacPX4Bridge:
         if self.view.count != 1:
             raise RuntimeError("Expected one chassis rigid body in the physics tensor view.")
         self.com_body = self.view.get_coms()[0, :3].astype(float).copy()
-        mass = self.config.get("vehicle_mass_kg")
-        if mass is None:
-            root = self.stage.GetPrimAtPath(self.config["vehicle_root_prim_path"])
-            paths = [
-                str(p.GetPath()) for p in Usd.PrimRange(root) if p.HasAPI(UsdPhysics.RigidBodyAPI)
-            ]
-            mass_view = self.sim_view.create_rigid_body_view(paths)
-            mass = float(np.sum(mass_view.get_masses()))
+        root = self.stage.GetPrimAtPath(self.config["vehicle_root_prim_path"])
+        paths = [str(p.GetPath()) for p in Usd.PrimRange(root) if p.HasAPI(UsdPhysics.RigidBodyAPI)]
+        mass_view = self.sim_view.create_rigid_body_view(paths)
+        mass = float(np.sum(mass_view.get_masses()))
+        expected_mass = self.config.get("vehicle_mass_kg")
+        if expected_mass is not None and not np.isclose(mass, expected_mass, rtol=0.01):
+            raise RuntimeError(
+                f"Configured mass {expected_mass} kg differs from physical mass {mass} kg"
+            )
         self.model = RotorModel(copy.deepcopy(self.config), float(mass))
         self.mass = float(mass)
         print(
@@ -165,6 +213,10 @@ class IsaacPX4Bridge:
             self.force, self.torque = self.model.step(
                 self.transport.controls, dt, self.enabled, com_flu
             )
+            if not np.any(self.force) and not np.any(self.torque):
+                # Do not keep waking a resting articulation with zero-wrench
+                # calls. Disarmed rotors are already zeroed by the model.
+                return
             world_com = position + rotation_body @ self.com_body
             # Sum of the four point forces and their moments about COM: one PhysX call,
             # avoiding repeated actor indices. This never overwrites body velocity.
@@ -192,6 +244,18 @@ class IsaacPX4Bridge:
             if gps_due:
                 self.next_gps_us = self.time_us + round(1e6 / self.config["gps_hz"])
             self.last_position = position.copy()
+            if self.time_us - self.last_truth_us >= 40000:
+                self.last_truth_us = self.time_us
+                self.diagnostics.emit(
+                    "isaac_truth",
+                    px4_sim_us=self.time_us,
+                    isaac_sim_ns=round(self.manager.get_simulation_time() * 1e9),
+                    position_world_xy=position[:2].tolist(),
+                    position_world_z=float(position[2]),
+                    velocity_world=velocity.tolist(),
+                    armed=self.transport.armed,
+                    actuators_fresh=self.transport.fresh(self.config["actuator_timeout_s"]),
+                )
             if time.monotonic() - self.last_log_wall >= 1.0:
                 entry = {
                     "sim_time_us": self.time_us,
@@ -238,6 +302,7 @@ class IsaacPX4Bridge:
         self.callbacks.clear()
         self.transport.close()
         self.log.close()
+        self.diagnostics.close()
         print(
             "[PX4 bridge] Closed. Restart PX4 and reload the bridge after an Isaac Stop/reset.",
             flush=True,

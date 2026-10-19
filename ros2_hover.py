@@ -114,9 +114,11 @@ class HoverPublisher(Node):
         node_name="isaac_hover_target",
         status_filename="ros2_hover_status.json",
         mode_notice="This script never arms or changes mode.",
+        publish_period_s=0.1,
     ):
         super().__init__(node_name)
         self.height = height
+        self.publish_period_s = publish_period_s
         self.state = HoverState()
         self.ready_samples = 0
         self.notice = None
@@ -136,7 +138,7 @@ class HoverPublisher(Node):
             VehicleLocalPosition, position_topic, self.on_position, qos
         )
         self.timer = self.create_timer(
-            0.1, self.publish_target, clock=Clock(clock_type=ClockType.STEADY_TIME)
+            publish_period_s, self.publish_target, clock=Clock(clock_type=ClockType.STEADY_TIME)
         )
         self.say("Waiting for valid PX4 position. " + mode_notice)
 
@@ -173,7 +175,7 @@ class HoverPublisher(Node):
         elif progressed and first:
             self.say(
                 f"Holding current X/Y and yaw, targeting {self.height:.2f} m "
-                "above PX4's local origin. Streaming targets at 10 Hz."
+                f"above PX4's local origin. Streaming targets at {1 / self.publish_period_s:g} Hz."
             )
         elif progressed and was_recovering:
             self.say("Timestamp correction confirmed; fixed hover stream remains active.")

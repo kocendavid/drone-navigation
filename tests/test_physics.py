@@ -4,6 +4,7 @@ import socket
 import sys
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -19,12 +20,59 @@ from px4_isaac.model import (
     resolve_gravity_direction,
 )
 from px4_isaac.transport import SimulatorTransport
+from px4_isaac.mass import normalized_link_masses, configured_link_masses
 
 CONFIG = json.loads((ROOT / "bridge_config.json").read_text())
 CONFIG["sensor_noise_std"] = {}
 
 
 class PhysicsTests(unittest.TestCase):
+    def test_disarmed_zero_wrench_is_not_applied_to_resting_articulation(self):
+        from px4_isaac.bridge import IsaacPX4Bridge
+
+        calls = []
+        transport = SimpleNamespace(
+            armed=False, fresh=lambda timeout: True, controls=[0.5] * 16, receive=lambda: None
+        )
+        model = RotorModel(copy.deepcopy(CONFIG), 1.5)
+        node = SimpleNamespace(
+            closed=False,
+            view=SimpleNamespace(
+                apply_forces_and_torques_at_position=lambda *args: calls.append(args)
+            ),
+            transport=transport,
+            config=CONFIG,
+            flu_in_body=np.eye(3),
+            com_body=np.zeros(3),
+            model=model,
+            _body_state=lambda: (np.zeros(3), np.eye(3), np.zeros(3), np.zeros(3)),
+            _fail=lambda error: self.fail(str(error)),
+        )
+        IsaacPX4Bridge._pre_step(node, 0.004, None)
+        self.assertEqual(calls, [])
+        transport.armed = True
+        IsaacPX4Bridge._pre_step(node, 0.004, None)
+        self.assertEqual(len(calls), 1)
+
+    def test_mass_rescaling_preserves_relative_link_distribution_and_checks_total(self):
+        masses = normalized_link_masses(
+            {"/World/quadcopter/chassis": 50000, "/World/quadcopter/rotor0": 100000}, 1.5
+        )
+        self.assertAlmostEqual(sum(masses.values()), 1.5)
+        self.assertAlmostEqual(
+            masses["/World/quadcopter/rotor0"] / masses["/World/quadcopter/chassis"], 2
+        )
+        config = dict(
+            vehicle_root_prim_path="/World/quadcopter", vehicle_mass_kg=1.5, link_masses_kg=masses
+        )
+        self.assertEqual(configured_link_masses(config), masses)
+        with self.assertRaises(ValueError):
+            configured_link_masses(dict(config, vehicle_mass_kg=2))
+        with self.assertRaises(ValueError):
+            normalized_link_masses({"bad": 0}, 1.5)
+        with self.assertRaises(ValueError):
+            configured_link_masses(dict(config, link_masses_kg={"/World/not_the_drone": 1.5}))
+
     def test_usd_default_gravity_is_negative_stage_up_axis(self):
         np.testing.assert_array_equal(resolve_gravity_direction([0, 0, 0], "Z"), [0, 0, -1])
         np.testing.assert_array_equal(resolve_gravity_direction([0, 0, 0], "Y"), [0, -1, 0])

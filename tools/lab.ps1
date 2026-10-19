@@ -5,7 +5,7 @@ No arming, takeoff, flight-mode changes, scene edits or timeline changes.
 #>
 param(
     [ValidateSet('status', 'start', 'stop')][string]$Action = 'status',
-    [ValidateSet('px4', 'agent', 'zenoh', 'mount', 'navigator', 'all')][string]$Service = 'all'
+    [ValidateSet('px4', 'agent', 'zenoh', 'mount', 'navigator', 'diagnostics', 'all')][string]$Service = 'all'
 )
 $ErrorActionPreference = 'Stop'
 $labRoot = Split-Path $PSScriptRoot -Parent
@@ -27,6 +27,7 @@ function Find-Service([string]$Name, $Processes) {
             'zenoh' { $candidate.Name -eq 'rmw_zenohd.exe' -and $line.Contains('jazzy_ws') }
             'mount' { $candidate.Name -eq 'static_transform_publisher.exe' -and $line -match '--frame-id\s+chassis' -and $line -match '--child-frame-id\s+point_cloud' }
             'navigator' { $candidate.Name -eq 'python.exe' -and $line.Contains($labRoot) -and $line.Contains('ros2_navigate.py') }
+            'diagnostics' { $candidate.Name -eq 'python.exe' -and $line.Contains($labRoot) -and $line.Contains('record_timing.py') }
         }
     })
 }
@@ -49,7 +50,7 @@ function Assert-CanStop {
 }
 
 $labProcesses = @(Get-LabProcesses)
-$labServices = if ($Service -eq 'all') { @('agent', 'zenoh', 'mount', 'px4', 'navigator') } else { @($Service) }
+$labServices = if ($Service -eq 'all') { @('diagnostics', 'agent', 'zenoh', 'mount', 'px4', 'navigator') } elseif ($Service -eq 'navigator' -and $Action -eq 'start') { @('diagnostics', 'navigator') } else { @($Service) }
 if ($Action -eq 'status') {
     foreach ($name in $labServices) {
         if ($name -eq 'px4') {
@@ -109,6 +110,7 @@ foreach ($name in $labServices) {
     $out = Join-Path $labLogs "lab_${name}_${stamp}.out.log"
     $err = Join-Path $labLogs "lab_${name}_${stamp}.err.log"
     switch ($name) {
+        'diagnostics' { $exe = 'python.exe'; $arguments = "`"$PSScriptRoot\record_timing.py`"" }
         'agent' { $exe = 'pixi.exe'; $arguments = "run --manifest-path `"$labManifest`" C:\px4-tools\agent-v2.4.3\bin\MicroXRCEAgent.exe udp4 -p 8888" }
         'zenoh' { $exe = 'pixi.exe'; $arguments = "run --manifest-path `"$labManifest`" ros2 run rmw_zenoh_cpp rmw_zenohd" }
         'mount' { $exe = 'pixi.exe'; $arguments = "run --manifest-path `"$labManifest`" cmd /d /c `"$PSScriptRoot\lidar_mount_tf.cmd`"" }

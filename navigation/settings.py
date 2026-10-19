@@ -29,6 +29,8 @@ class NavigationSettings:
     map_height_cells: int = 120
     map_origin_x_m: float = -6.0
     map_origin_y_m: float = -6.0
+    route_clearance_weight: float = 8.0
+    route_clearance_scale_m: float = 2.0
 
     def validate(self):
         values = asdict(self)
@@ -50,12 +52,12 @@ class NavigationSettings:
         if not self.body_radius_m < self.stop_distance_m <= self.obstacle_margin_m:
             raise ValueError("Obstacle margin must cover the stop distance and vehicle radius")
         if (
-            self.cruise_m_s > 1.0
+            self.cruise_m_s > 4.0
             or self.minimum_approach_m_s > self.cruise_m_s
             or self.turn_speed_m_s > self.cruise_m_s
         ):
             raise ValueError(
-                "Invalid approach/turn/cruise speed; this experiment supports cruise up to 1 m/s"
+                "Invalid approach/turn/cruise speed; this simulation supports cruise up to 4 m/s"
             )
         if self.target_lead_m > 0.30 or self.acceleration_m_s2 > 0.5:
             raise ValueError(
@@ -65,6 +67,8 @@ class NavigationSettings:
             raise ValueError("Yaw is limited to 90 deg/s and 180 deg/s² acceleration")
         if self.braking_reaction_s > 2.0:
             raise ValueError("Braking reaction allowance must be at most two simulated seconds")
+        if self.route_clearance_weight > 20 or self.route_clearance_scale_m > 10:
+            raise ValueError("Route clearance weight must be at most 20 and scale at most 10 m")
         if (
             type(self.exploration_max_goals) is not int
             or not 1 <= self.exploration_max_goals <= 100
@@ -77,9 +81,9 @@ class NavigationSettings:
                 type(value) is not int or not 16 <= value <= 1024
                 for value in (self.map_width_cells, self.map_height_cells)
             )
-            or self.map_width_cells * self.map_height_cells > 65536
+            or self.map_width_cells * self.map_height_cells > 131072
         ):
-            raise ValueError("Map dimensions must be integers with at most 65,536 total cells")
+            raise ValueError("Map dimensions must be integers with at most 131,072 total cells")
         return self
 
     def map_options(self):
@@ -89,6 +93,8 @@ class NavigationSettings:
             origin=(self.map_origin_x_m, self.map_origin_y_m),
             body_radius=self.body_radius_m,
             clearance=self.obstacle_margin_m,
+            route_clearance_weight=self.route_clearance_weight,
+            route_clearance_scale=self.route_clearance_scale_m,
         )
 
 

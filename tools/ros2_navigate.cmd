@@ -14,5 +14,7 @@ set "SKIP_DEFAULT_XML="
 set "RMW_FASTRTPS_USE_QOS_FROM_XML="
 set "FASTRTPS_DEFAULT_PROFILES_FILE=C:\px4-tools\fastdds.xml"
 set "FASTDDS_DEFAULT_PROFILES_FILE=C:\px4-tools\fastdds.xml"
+:run_navigator
 python "%~dp0..\ros2_navigate.py" %*
+if %errorlevel% equ 75 goto run_navigator
 exit /b %errorlevel%

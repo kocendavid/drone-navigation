@@ -3,16 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Isaac room navigator</title>
+    <title>Isaac flight console</title>
     <style>
       :root {
         color-scheme: dark;
-        --bg: #111820;
-        --panel: #1b2631;
+        --bg: #0c1219;
+        --panel: #141e29;
         --ink: #edf4fa;
-        --muted: #afbfcc;
-        --line: #334451;
+        --muted: #9caebe;
+        --line: #2a3a49;
         --cyan: #58d6e6;
+        --green: #79dfac;
+        --amber: #f0be70;
         --free: #21443e;
         --obstacle: #f27564;
         --unknown: #26323f;
@@ -26,268 +28,842 @@
         background: var(--bg);
         color: var(--ink);
         font:
-          16px system-ui,
+          14px system-ui,
           sans-serif;
       }
       main {
-        max-width: 1250px;
+        max-width: 1920px;
         margin: auto;
-        padding: 28px;
+        padding: 18px 24px 28px;
       }
-      header {
-        display: flex;
-        justify-content: space-between;
-        gap: 24px;
-        align-items: center;
-        margin-bottom: 24px;
+      button,
+      input,
+      select {
+        font: inherit;
       }
-      h1 {
-        font-size: 25px;
-        margin: 0 0 6px;
-        font-weight: 600;
-      }
-      p {
-        margin: 0;
-        color: var(--muted);
-      }
-      .tag {
-        padding: 9px 15px;
+      button,
+      select {
         border: 1px solid var(--line);
-        border-radius: 24px;
-        font-size: 14px;
-        white-space: nowrap;
-      }
-      .layout {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) 310px;
-        gap: 22px;
-      }
-      .map {
-        align-self: start;
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 16px;
-        padding: 18px;
-      }
-      .map-column {
-        min-width: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 20px;
-        align-self: start;
-      }
-      canvas {
-        width: 100%;
-        aspect-ratio: 1;
-        display: block;
-        cursor: crosshair;
-        touch-action: none;
-      }
-      .legend {
-        display: flex;
-        gap: 18px;
-        flex-wrap: wrap;
-        margin-top: 12px;
-        font-size: 13px;
-        color: var(--muted);
-      }
-      .swatch {
-        display: inline-block;
-        width: 12px;
-        height: 12px;
-        border-radius: 3px;
-        margin-right: 6px;
-      }
-      .side {
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-      }
-      .card {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 16px;
-        padding: 20px;
-      }
-      .card h2 {
-        font-size: 15px;
-        font-weight: 600;
-        margin: 0 0 14px;
-        color: var(--muted);
-      }
-      #phase {
-        font-size: 24px;
-        margin: 0 0 10px;
-      }
-      #reason {
-        font-size: 14px;
-        line-height: 1.5;
-        height: 64px;
-        overflow: auto;
-      }
-      #readiness {
-        height: 44px;
-        overflow: auto;
-      }
-      .buttons {
-        display: grid;
-        gap: 10px;
-        margin-top: 20px;
+        border-radius: 7px;
+        background: #223242;
+        color: var(--ink);
       }
       button {
-        padding: 12px 16px;
-        font: inherit;
-        border-radius: 10px;
-        border: 1px solid var(--line);
-        background: #293b49;
-        color: var(--ink);
+        padding: 10px 12px;
         cursor: pointer;
+        transition:
+          background 0.15s,
+          border-color 0.15s;
+      }
+      button:hover:enabled {
+        background: #30465a;
+        border-color: #6a879b;
+      }
+      button:focus-visible,
+      summary:focus-visible,
+      a:focus-visible,
+      input:focus-visible,
+      select:focus-visible {
+        outline: 2px solid var(--cyan);
+        outline-offset: 3px;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
       }
       button.primary {
         background: var(--cyan);
         color: #10222b;
         border-color: var(--cyan);
+        font-weight: 650;
+      }
+      button.primary:hover:enabled {
+        background: #8ae5ee;
+      }
+      button.caution {
+        color: var(--amber);
+        border-color: #7e653d;
+        background: #332b20;
+      }
+      button.danger {
+        color: #ffac9f;
+        border-color: #7e4943;
+        background: #332326;
+      }
+      a {
+        color: var(--cyan);
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+      h1,
+      h2,
+      h3 {
+        margin: 0;
         font-weight: 600;
       }
-      button:disabled {
-        opacity: 0.35;
-        cursor: not-allowed;
+      h1 {
+        font-size: 15px;
+        letter-spacing: 0.1em;
       }
-      #action-status {
-        min-height: 64px;
-        margin-top: 12px;
-        padding: 10px;
-        border: 1px solid var(--line);
+      h2 {
+        font-size: 14px;
+      }
+      .eyebrow,
+      .group-label {
+        color: var(--muted);
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .console-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding-bottom: 14px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .brand-mark {
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        border: 1px solid #397887;
         border-radius: 8px;
+        color: var(--cyan);
+        font-size: 23px;
       }
-      #action-status[data-status="rejected"],
-      #action-status[data-status="failed"],
-      #action-status[data-status="expired"] {
-        border-color: var(--obstacle);
+      #mode {
+        margin-top: 3px;
+        font-size: 11px;
       }
-      #action-status[data-status="sending"],
-      #action-status[data-status="queued"],
-      #action-status[data-status="running"] {
-        border-color: var(--cyan);
+      .flight-summary {
+        display: flex;
+        align-items: center;
+        gap: 12px;
       }
-      .history-card {
+      #phase {
+        color: var(--cyan);
+        font-size: 19px;
+        font-weight: 650;
+      }
+      #reason {
+        max-width: 570px;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .connection {
+        white-space: nowrap;
+        color: var(--tone, var(--muted));
+        font-size: 12px;
+      }
+      .systems {
+        display: grid;
+        grid-template-columns: repeat(8, minmax(0, 1fr));
+        gap: 7px;
+        margin-bottom: 12px;
+      }
+      .state-wrap {
+        position: relative;
         min-width: 0;
       }
-      .history-columns {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 20px;
+      .state-button {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        align-items: flex-start;
+        padding: 9px 11px;
+        cursor: help;
+        background: var(--panel);
+        text-align: left;
       }
-      .history-list {
-        max-height: 270px;
-        overflow: auto;
-        padding-left: 24px;
-        font-size: 13px;
+      .state-label {
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
       }
-      .history-list li {
-        margin: 8px 0;
-      }
-      .history-list button {
-        padding: 3px 8px;
+      .state-value {
         font-size: 12px;
-        margin-left: 6px;
+        display: flex;
+        gap: 7px;
+        align-items: center;
       }
-      .history-tools {
+      .state-value::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        flex-shrink: 0;
+        border-radius: 50%;
+        background: currentColor;
+      }
+      [data-tone="good"] {
+        --tone: var(--green);
+      }
+      [data-tone="warn"] {
+        --tone: var(--amber);
+      }
+      [data-tone="bad"] {
+        --tone: var(--obstacle);
+      }
+      [data-tone="busy"] {
+        --tone: var(--cyan);
+      }
+      [data-tone="unknown"] {
+        --tone: var(--muted);
+      }
+      .state-button {
+        border-color: color-mix(in srgb, var(--tone, var(--muted)) 35%, var(--line));
+      }
+      .state-button .state-value {
+        color: var(--tone, var(--muted));
+      }
+      .tooltip {
+        display: none;
+        position: absolute;
+        left: 0;
+        top: calc(100% + 7px);
+        width: 260px;
+        max-width: 80vw;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #263746;
+        color: var(--ink);
+        font-size: 12px;
+        line-height: 1.5;
+        box-shadow: 0 8px 22px #0007;
+        z-index: 10;
+        pointer-events: none;
+      }
+      .state-wrap:nth-last-child(-n + 2) .tooltip {
+        left: auto;
+        right: 0;
+      }
+      .state-button:hover + .tooltip,
+      .state-button:focus + .tooltip {
+        display: block;
+      }
+      .telemetry {
+        display: grid;
+        grid-template-columns: 1.3fr repeat(7, minmax(0, 1fr));
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--panel);
+        margin-bottom: 14px;
+        overflow: hidden;
+      }
+      .instrument {
+        min-width: 0;
+        padding: 12px 14px;
+        border-right: 1px solid var(--line);
+      }
+      .instrument:last-child {
+        border: 0;
+      }
+      .instrument dt {
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        margin-bottom: 6px;
+      }
+      .instrument dd {
+        margin: 0;
+        font-size: clamp(17px, 1.55vw, 27px);
+        font-weight: 550;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .instrument[data-tone] dd {
+        color: var(--tone);
+      }
+      .telemetry[data-stale="true"] dd {
+        opacity: 0.4;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 355px;
+        gap: 14px;
+        align-items: start;
+      }
+      .map,
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        min-width: 0;
+      }
+      .map {
+        padding: 12px;
+      }
+      .map-header,
+      .section-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #map-context {
+        font-size: 11px;
+      }
+      .map-viewport {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        overflow: hidden;
+      }
+      canvas {
+        width: auto;
+        height: auto;
+        max-width: 100%;
+        max-height: min(55vh, 560px);
+        display: block;
+        cursor: crosshair;
+        touch-action: none;
+      }
+      canvas[data-stale="true"] {
+        opacity: 0.45;
+      }
+      .map-loading {
+        position: absolute;
+        left: 50%;
+        top: 16px;
+        transform: translateX(-50%);
+        background: #101c29ed;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 9px 13px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      .legend {
+        display: flex;
+        gap: 8px 15px;
+        flex-wrap: wrap;
+        font-size: 10px;
+        color: var(--muted);
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+      }
+      .swatch {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+        margin-right: 4px;
+      }
+      .map-footer {
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: 14px;
-        margin-bottom: 12px;
+        justify-content: space-between;
+        gap: 8px;
+        padding-top: 10px;
+        font-size: 11px;
+        color: var(--muted);
       }
-      #history-slider {
-        width: 100%;
+      .side {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
       }
-      #map-quality,
-      #review-status {
-        margin: 10px 0;
-        font-size: 13px;
+      .card {
+        padding: 14px;
       }
-      @media (max-width: 760px) {
-        .history-columns {
-          grid-template-columns: 1fr;
+      .navigation-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      #flight-mode {
+        font-size: 11px;
+      }
+      .next-step {
+        padding: 9px 11px;
+        border-left: 2px solid var(--tone, var(--cyan));
+        background: #0c1721;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--ink);
+      }
+      .buttons {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 7px;
+      }
+      .buttons .wide {
+        grid-column: 1 / -1;
+      }
+      .buttons button {
+        font-size: 12px;
+        padding: 8px 10px;
+      }
+      .group-label {
+        margin-bottom: 7px;
+      }
+      .help {
+        font-size: 11px;
+        line-height: 1.5;
+        color: var(--muted);
+      }
+      .help:empty {
+        display: none;
+      }
+      .feedback {
+        font-size: 11px;
+        line-height: 1.5;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 9px;
+        color: var(--muted);
+      }
+      .feedback:not([data-status]) {
+        display: none;
+      }
+      .feedback[data-status="rejected"],
+      .feedback[data-status="failed"],
+      .feedback[data-status="expired"],
+      .feedback[data-status="unconfirmed"] {
+        border-color: var(--amber);
+        color: var(--amber);
+      }
+      .feedback[data-status="sending"],
+      .feedback[data-status="queued"],
+      .feedback[data-status="running"] {
+        border-color: #387581;
+        color: var(--cyan);
+      }
+      [data-loading="true"]::before {
+        content: "";
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        margin-right: 7px;
+        vertical-align: -1px;
+        animation: spin 0.8s linear infinite;
+      }
+      .state-button[data-loading="true"]::before {
+        display: none;
+      }
+      .state-button[data-loading="true"] .state-value::before {
+        background: none;
+        width: 9px;
+        height: 9px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
         }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before {
+          animation: none !important;
+          transition: none !important;
+        }
+      }
+      details {
+        border-top: 1px solid var(--line);
+        padding-top: 10px;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      details > :not(summary) {
+        margin-top: 10px;
+      }
+      .diagnostics {
+        margin-top: 12px;
+      }
+      .diagnostic-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+      }
+      .diagnostic-grid h3 {
+        font-size: 12px;
+        margin-bottom: 8px;
       }
       .metric {
         display: flex;
         justify-content: space-between;
-        gap: 12px;
-        padding: 9px 0;
+        gap: 10px;
+        padding: 5px 0;
+        font-size: 11px;
         border-bottom: 1px solid var(--line);
-        font-size: 14px;
-      }
-      .metric:last-child {
-        border-bottom: 0;
       }
       .value {
         font-variant-numeric: tabular-nums;
       }
-      #note {
-        margin-top: 16px;
-        min-height: 44px;
-        font-size: 14px;
+      .history-card {
+        margin-top: 14px;
+      }
+      .log-meta {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .event-log {
+        list-style: none;
+        padding: 0;
+        margin: 12px -14px 0;
+        max-height: 320px;
+        overflow: auto;
+        scrollbar-gutter: stable;
+        font:
+          12px ui-monospace,
+          Consolas,
+          monospace;
+      }
+      .log-row {
+        display: grid;
+        grid-template-columns: 148px 104px minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: baseline;
+        padding: 9px 14px;
+        border-top: 1px solid #253442;
+        border-left: 3px solid var(--tone, var(--line));
+      }
+      .log-row:hover {
+        background: #1c2a37;
+      }
+      .log-row time {
+        color: var(--muted);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .log-kind {
+        color: var(--tone, var(--cyan));
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        overflow-wrap: anywhere;
+      }
+      .log-message {
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
+      .log-row button {
+        padding: 2px 7px;
+        font-size: 10px;
+        white-space: nowrap;
+      }
+      .log-empty {
+        color: var(--muted);
+        padding: 14px;
+      }
+      .history-tools {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 14px;
+        font-size: 11px;
+      }
+      #history-slider {
+        width: 100%;
+        accent-color: var(--cyan);
+      }
+      #review-status,
+      #map-quality {
+        font-size: 11px;
         line-height: 1.5;
       }
-      .band {
-        display: flex;
-        justify-content: space-between;
-        font-size: 14px;
-        margin: 10px 0;
+      @media (min-width: 1500px) {
+        .layout {
+          grid-template-columns: minmax(0, 1fr) 390px;
+        }
       }
-      .help {
-        font-size: 13px;
-        line-height: 1.6;
-        color: var(--muted);
-      }
-      @media (max-width: 850px) {
+      @media (max-width: 1150px) {
+        .state-wrap:nth-child(4n) .tooltip {
+          left: auto;
+          right: 0;
+        }
         main {
-          padding: 16px;
+          padding: 14px;
+        }
+        .systems {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+        .telemetry {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+        .instrument:nth-child(-n + 4) {
+          border-bottom: 1px solid var(--line);
+        }
+        .instrument:nth-child(4) {
+          border-right: 0;
+        }
+        .flight-summary {
+          max-width: 50%;
+        }
+        .layout {
+          grid-template-columns: minmax(0, 1fr) 320px;
+        }
+      }
+      @media (max-width: 760px) {
+        .console-header {
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+        .flight-summary {
+          max-width: 100%;
+          order: 3;
+          flex-basis: 100%;
         }
         .layout {
           grid-template-columns: 1fr;
         }
-        .side {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
+        canvas {
+          max-height: min(50vh, 390px);
         }
-        .side .card:first-child {
-          grid-column: 1/-1;
+        .diagnostic-grid {
+          grid-template-columns: 1fr;
         }
-        header {
-          align-items: flex-start;
+        .instrument {
+          padding: 10px;
         }
-        .tag {
-          font-size: 12px;
+        .instrument dt {
+          font-size: 9px;
+        }
+        .instrument dd {
+          font-size: 16px;
+        }
+        .log-row {
+          grid-template-columns: 1fr auto;
+          gap: 5px 12px;
+        }
+        .log-row time {
+          grid-column: 1;
+        }
+        .log-kind {
+          grid-column: 2;
+          grid-row: 1;
+        }
+        .log-message {
+          grid-column: 1 / -1;
+        }
+        .log-row button {
+          justify-self: start;
         }
       }
-      @media (max-width: 500px) {
-        .side {
-          display: flex;
+      @media (max-width: 420px) {
+        .state-wrap:nth-child(even) .tooltip {
+          left: auto;
+          right: 0;
         }
-        header {
-          flex-direction: column;
-          gap: 10px;
+        .systems {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .telemetry {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .instrument {
+          border-bottom: 1px solid var(--line);
+        }
+        .instrument:nth-child(even) {
+          border-right: 0;
+        }
+        .instrument:nth-last-child(-n + 2) {
+          border-bottom: 0;
         }
       }
     </style>
   </head>
   <body>
     <main>
-      <header>
-        <div>
-          <h1>Isaac room navigator</h1>
-          <p>Choose a destination or explore unseen space at 1 m height.</p>
+      <header class="console-header">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">⌖</span>
+          <div>
+            <h1>
+              ISAAC <span style="color: var(--muted); font-weight: 400">/ FLIGHT CONSOLE</span>
+            </h1>
+            <p id="mode">Connecting to controller</p>
+          </div>
         </div>
-        <div id="mode" class="tag">Connecting to live map</div>
+        <div class="flight-summary">
+          <div id="phase">WAITING</div>
+          <p id="reason">Waiting for sensor data</p>
+          <p id="runtime-status" class="help" hidden></p>
+        </div>
+        <div id="connection" class="connection" data-loading="true" role="status">Connecting</div>
       </header>
+      <section class="systems" aria-label="Live vehicle and system states">
+        <div class="state-wrap">
+          <button
+            type="button"
+            id="state-telemetry"
+            class="state-button"
+            data-tone="busy"
+            data-loading="true"
+            aria-describedby="tip-telemetry"
+          >
+            <span class="state-label">PX4 + simulation</span
+            ><span id="value-telemetry" class="state-value">Connecting</span></button
+          ><span class="tooltip" role="tooltip" id="tip-telemetry"
+            >Waiting for fresh PX4 state and simulation.</span
+          >
+        </div>
+        <div class="state-wrap">
+          <button
+            type="button"
+            id="state-preflight"
+            class="state-button"
+            data-tone="unknown"
+            aria-describedby="tip-preflight"
+          >
+            <span class="state-label">Preflight</span
+            ><span id="value-preflight" class="state-value">Unknown</span></button
+          ><span class="tooltip" role="tooltip" id="tip-preflight"
+            >Waiting for PX4 preflight checks.</span
+          >
+        </div>
+        <div class="state-wrap">
+          <button
+            type="button"
+            id="state-vehicle"
+            class="state-button"
+            data-tone="unknown"
+            aria-describedby="tip-vehicle"
+          >
+            <span class="state-label">Vehicle</span
+            ><span id="value-vehicle" class="state-value">Unknown</span></button
+          ><span class="tooltip" role="tooltip" id="tip-vehicle"
+            >Arming and landed state are not available yet.</span
+          >
+        </div>
+        <div class="state-wrap">
+          <button
+            type="button"
+            id="state-motion"
+            class="state-button"
+            data-tone="unknown"
+            aria-describedby="tip-motion"
+          >
+            <span class="state-label">Motion</span
+            ><span id="value-motion" class="state-value">Unknown</span></button
+          ><span class="tooltip" role="tooltip" id="tip-motion"
+            >Stationary ground origin or stable 1 m hover.</span
+          >
+        </div>
+        <div class="state-wrap">
+          <button
+            type="button"
+            id="state-map"
+            class="state-button"
+            data-tone="busy"
+            aria-describedby="tip-map"
+          >
+            <span class="state-label">LiDAR map</span
+            ><span id="value-map" class="state-value">Waiting</span></button
+          ><span class="tooltip" role="tooltip" id="tip-map"
+            >Waiting for live aligned LiDAR observations.</span
+          >
+        </div>
+        <div class="state-wrap">
+          <button
+            type="button"
+            id="state-link"
+            class="state-button"
+            data-tone="unknown"
+            aria-describedby="tip-link"
+          >
+            <span class="state-label">Command link</span
+            ><span id="value-link" class="state-value">Unknown</span></button
+          ><span class="tooltip" role="tooltip" id="tip-link"
+            >PX4 command connection and flight-target stream.</span
+          >
+        </div>
+        <div class="state-wrap">
+          <button
+            type="button"
+            id="state-navigation"
+            class="state-button"
+            data-tone="unknown"
+            aria-describedby="tip-navigation"
+          >
+            <span class="state-label">Navigation</span
+            ><span id="value-navigation" class="state-value">Waiting</span></button
+          ><span class="tooltip" role="tooltip" id="tip-navigation"
+            >Waiting for navigation readiness.</span
+          >
+        </div>
+        <div class="state-wrap">
+          <button
+            type="button"
+            id="state-experiment"
+            class="state-button"
+            data-tone="unknown"
+            aria-describedby="tip-experiment"
+          >
+            <span class="state-label">Experiment</span
+            ><span id="value-experiment" class="state-value">Waiting</span></button
+          ><span class="tooltip" role="tooltip" id="tip-experiment"
+            >Reset and recovery status.</span
+          >
+        </div>
+      </section>
+      <dl id="telemetry" class="telemetry" aria-label="Live flight telemetry">
+        <div class="instrument">
+          <dt>Destination · X / Y</dt>
+          <dd id="goal">—</dd>
+        </div>
+        <div class="instrument">
+          <dt>Remaining</dt>
+          <dd id="remaining">—</dd>
+        </div>
+        <div class="instrument" id="clearance-instrument">
+          <dt>Clearance ahead</dt>
+          <dd id="distance">—</dd>
+        </div>
+        <div class="instrument">
+          <dt>Reference speed</dt>
+          <dd id="speed">—</dd>
+        </div>
+        <div class="instrument">
+          <dt>Measured speed</dt>
+          <dd id="actual-speed">—</dd>
+        </div>
+        <div class="instrument">
+          <dt>Height</dt>
+          <dd id="height">—</dd>
+        </div>
+        <div class="instrument">
+          <dt>Heading · N</dt>
+          <dd id="yaw-measured">—</dd>
+        </div>
+        <div class="instrument">
+          <dt>Target heading</dt>
+          <dd id="yaw-reference">—</dd>
+        </div>
+      </dl>
       <div class="layout">
-        <div class="map-column">
-          <section class="map">
+        <section class="map">
+          <div class="map-header">
+            <h2>Local map</h2>
             <p id="map-context" role="status">Live map · provisional observations</p>
+          </div>
+          <div class="map-viewport">
             <canvas
               id="map"
               width="900"
@@ -295,178 +871,205 @@
               aria-label="Live overhead room map with drone, obstacles, and route. Click observed space to preview a destination."
               >Live room map</canvas
             >
-            <div class="legend">
-              <span><i class="swatch" style="background: var(--free)"></i>Observed space</span
-              ><span><i class="swatch" style="background: var(--obstacle)"></i>Confirmed wall</span
-              ><span><i class="swatch" style="background: #e3af72"></i>Tentative obstacle</span
-              ><span><i class="swatch" style="background: var(--unknown)"></i>Unknown</span
-              ><span><i class="swatch" style="background: #34556d"></i>Known start area</span
-              ><span><i class="swatch" style="background: var(--margin)"></i>Clearance margin</span
-              ><span><i class="swatch" style="background: var(--cyan)"></i>Route</span
-              ><span><i class="swatch" style="background: #b1b8d1"></i>Actually flown</span
-              ><span><i class="swatch" style="background: #f0d670"></i>Frontier</span>
+            <div id="map-loading" class="map-loading" role="status" data-loading="true">
+              Waiting for LiDAR and transforms
             </div>
-          </section>
-          <section class="card history-card">
-            <h2>Map, travel and decision history</h2>
-            <p id="map-quality">
-              Provisional LiDAR map. A changing observation is not a confirmed wall.
-            </p>
-            <div class="history-tools">
-              <label
-                >Run
-                <select id="history-source">
-                  <option value="current">Current</option>
-                  <option value="previous">Previous reset run</option>
-                </select></label
-              >
-              <label><input id="show-trail" type="checkbox" checked /> Flown path</label>
-              <label><input id="show-targets" type="checkbox" checked /> Selected points</label>
-              <label><input id="show-rays" type="checkbox" /> LiDAR return endpoints</label>
-              <button id="live-view">Return to live map</button>
-              <a id="download-history" href="/api/history/download" download
-                >Download full map and decision log</a
-              >
-            </div>
-            <input
-              id="history-slider"
-              type="range"
-              min="0"
-              max="0"
-              value="0"
-              aria-label="Recorded map frame"
-            />
-            <p id="review-status">Live map. Select a recorded frame to review earlier decisions.</p>
-            <p id="frame-evidence" class="help"></p>
-            <div class="history-columns">
-              <div>
-                <h3>Selected points, including abandoned targets</h3>
-                <ol id="point-history" class="history-list"></ol>
-              </div>
-              <div>
-                <h3>Decisions and action responses</h3>
-                <ol id="decision-history" class="history-list"></ol>
-              </div>
-            </div>
-          </section>
-        </div>
+          </div>
+          <div class="legend">
+            <span><i class="swatch" style="background: var(--free)"></i>Observed</span
+            ><span><i class="swatch" style="background: var(--obstacle)"></i>Confirmed wall</span
+            ><span><i class="swatch" style="background: #e3af72"></i>Tentative obstacle</span
+            ><span><i class="swatch" style="background: var(--unknown)"></i>Unknown</span
+            ><span><i class="swatch" style="background: #34556d"></i>Start area</span
+            ><span><i class="swatch" style="background: var(--margin)"></i>Margin</span
+            ><span><i class="swatch" style="background: var(--cyan)"></i>Route</span
+            ><span><i class="swatch" style="background: #b1b8d1"></i>Flown</span
+            ><span><i class="swatch" style="background: #f0d670"></i>Frontier</span>
+          </div>
+          <div class="map-footer">
+            <span id="fresh">Waiting for map</span
+            ><label><input id="show-centers" type="checkbox" checked /> Known-space centers</label
+            ><span>Click observed space to preview a destination</span>
+          </div>
+        </section>
         <aside class="side">
-          <section class="card">
-            <h2>Flight setup</h2>
-            <p id="flight-next" role="status" aria-live="polite">Connecting to flight telemetry…</p>
-            <p id="flight-mode" class="help">PX4 mode unavailable</p>
-            <div class="buttons">
-              <button id="takeoff" class="primary" disabled>Take off to 1 m</button>
-              <button id="offboard" disabled>Enable navigation</button>
-              <button id="land" disabled>Land here</button>
+          <section class="card navigation-card" aria-label="Flight and navigation controls">
+            <div class="section-heading">
+              <h2>Navigation</h2>
+              <p id="flight-mode">PX4 unavailable</p>
             </div>
-            <p class="help">
-              Takeoff explicitly arms and climbs. Enable navigation hands the hover to PX4 Offboard.
-              Then select Explore. Reset finishes on the ground.
+            <p id="flight-next" class="next-step" role="status" aria-live="polite">
+              Connecting to flight telemetry…
             </p>
-            <p id="flight-action" class="help"></p>
-          </section>
-          <section class="card">
-            <h2>Navigation</h2>
-            <div id="phase">Waiting</div>
-            <p id="reason">Waiting for sensor data</p>
-            <p id="readiness" class="help"></p>
+            <div>
+              <p class="group-label">Flight</p>
+              <div class="buttons">
+                <button
+                  id="takeoff"
+                  class="primary"
+                  title="Explicitly arm and climb to a 1 m hover"
+                  disabled
+                >
+                  Take off · 1 m</button
+                ><button id="offboard" title="Hand the stable hover to PX4 Offboard" disabled>
+                  Enable navigation
+                </button>
+              </div>
+            </div>
+            <div>
+              <p class="group-label">Route & exploration</p>
+              <div class="buttons">
+                <button
+                  id="go"
+                  class="primary"
+                  title="Navigate to the destination selected on the map"
+                  disabled
+                >
+                  Navigate</button
+                ><button id="explore" title="Explore unseen space at 1 m height" disabled>
+                  Explore</button
+                ><button
+                  id="mission"
+                  class="wide"
+                  title="Explore, verify the enclosed map, save it, then land here"
+                  disabled
+                >
+                  Explore & land</button
+                ><button id="home" disabled>Return to start</button
+                ><button id="resume" disabled>Resume goal</button>
+              </div>
+            </div>
             <label class="help"
               ><input id="continuous" type="checkbox" checked /> Re-evaluate frontier targets while
               flying</label
             >
             <div class="buttons">
-              <button id="go" class="primary" disabled>Navigate to destination</button
-              ><button id="explore" disabled>Explore unseen space</button
-              ><button id="mission" disabled>Explore and land here</button
-              ><button id="hold" disabled>Hold here / stop exploring</button
-              ><button id="resume" disabled>Resume goal</button>
-              <button id="home" disabled>Return home</button>
-              <button id="restart" disabled>Restart experiment</button>
+              <button id="hold" class="caution" disabled>Hold / stop</button
+              ><button id="land" class="danger" disabled>Land here</button>
             </div>
-            <p id="home-status" class="help">
-              optimizedRoutePlanner: home is captured at the first stable mapped hover. Return home
-              finishes hovering.
-            </p>
-            <p id="reset-status" class="help">
-              Restart restores the starting pose, clears the map and history, and leaves the drone
-              disarmed on the ground. Your maze edits are preserved.
-            </p>
-            <div id="note">Click observed space to preview a route.</div>
-            <div id="action-status" role="status" aria-live="polite">No pending action.</div>
-          </section>
-          <section class="card">
-            <h2>Measured state</h2>
-            <div class="metric"><span>Destination</span><span id="goal" class="value">—</span></div>
-            <div class="metric">
-              <span>Remaining</span><span id="remaining" class="value">—</span>
+            <div id="action-status" class="feedback" role="status" aria-live="polite">
+              No pending action.
             </div>
-            <div class="metric">
-              <span>Clearance ahead</span><span id="distance" class="value">—</span>
-            </div>
-            <div class="metric">
-              <span>Reference speed</span><span id="speed" class="value">0.00 m/s</span>
-            </div>
-            <div class="metric">
-              <span>Measured speed</span><span id="actual-speed" class="value">—</span>
-            </div>
-            <div class="metric"><span>Height</span><span id="height" class="value">—</span></div>
-            <div class="metric">
-              <span>Nose heading · from North</span><span id="yaw-measured">—</span>
-            </div>
-            <div class="metric">
-              <span>Commanded heading</span><span id="yaw-reference">—</span>
-            </div>
-            <p id="yaw-policy" class="help"></p>
-            <div class="metric"><span>Map</span><span id="fresh">Waiting</span></div>
-          </section>
-          <section class="card">
-            <h2>Exploration</h2>
-            <div id="exploration-phase">Requires updated controller</div>
-            <p id="exploration-reason" class="help">
-              Start exploration to let the navigator select viewpoints near unknown space.
-            </p>
-            <div class="metric"><span>Viewpoints reached</span><span id="viewpoints">0</span></div>
-            <div class="metric">
-              <span>New observed area</span><span id="coverage">0.00 m²</span>
-            </div>
-            <div class="metric"><span>Distance flown</span><span id="flown">0.00 m</span></div>
-            <div class="metric"><span>New area / distance</span><span id="area-per-m">—</span></div>
-            <div class="metric"><span>Simulation time</span><span id="elapsed">0.0 s</span></div>
-            <div class="metric">
-              <span>Target evaluations / switches</span><span id="switches">0 / 0</span>
-            </div>
-            <div class="metric">
-              <span>Current target potential</span><span id="potential">—</span>
-            </div>
-            <p id="reconsider-reason" class="help"></p>
-            <p id="corner-status" class="help"></p>
-          </section>
-          <section class="card">
-            <h2>Explore and land mission</h2>
-            <div id="mission-phase">Not started</div>
-            <p id="mission-reason" class="help">
-              Verify an enclosed observed map, save it, then ask PX4 to land here. Unknown
-              boundaries, sensing faults and experiment limits do not count as completion.
-            </p>
-            <div id="saved-map" class="help"></div>
-          </section>
-          <section class="card">
-            <h2>Distance bands</h2>
-            <div id="bands">
-              <div class="band"><span>Beyond 3 m</span><span>Cruise</span></div>
-              <div class="band"><span>3–2 m</span><span>Slow down</span></div>
-              <div class="band"><span>2–0.9 m</span><span>Approach slowly</span></div>
-              <div class="band"><span>At 0.9 m</span><span>Hold / replan</span></div>
-            </div>
-            <p class="help">
-              A fixed-height map from observed LiDAR rays and Isaac position. Unknown space stays
-              excluded. The initial 0.6 m hover area is assumed clear and shown separately. Flight
-              control can be enabled with the explicit flight buttons above.
-            </p>
+            <p id="note" class="help">Click observed space to preview a route.</p>
+            <details open>
+              <summary>Frontier work list</summary>
+              <p id="frontier-summary" class="help">
+                Frontiers appear from fresh map observations.
+              </p>
+              <div
+                id="frontier-list"
+                class="help"
+                style="max-height: 220px; overflow-y: auto"
+              ></div>
+            </details>
+            <details>
+              <summary>Readiness, return route & recovery</summary>
+              <p id="readiness" class="help"></p>
+              <p id="flight-action" class="help"></p>
+              <p id="home-status" class="help">
+                Start H is captured at the first stable mapped hover.
+              </p>
+              <button id="home-preview" disabled>Preview return route</button>
+              <p id="home-preview-status" class="help" role="status">
+                Preview draws a route without moving the drone. Return finishes hovering.
+              </p>
+              <p id="reset-status" class="help">
+                Restart restores the starting pose and clears the map and history. Your maze edits
+                are preserved.
+              </p>
+            </details>
+            <button
+              id="restart"
+              class="danger"
+              title="Restore the starting pose, clear the map and history, and leave the drone disarmed on the ground. Maze edits are preserved."
+              disabled
+            >
+              Restart experiment
+            </button>
           </section>
         </aside>
       </div>
+      <section class="card history-card" aria-label="Combined target, decision and command log">
+        <div class="section-heading">
+          <h2>Event log</h2>
+          <span id="log-count" class="log-meta">Latest first · targets / decisions / commands</span>
+        </div>
+        <ol id="event-log" class="event-log" aria-label="Flight events, latest first">
+          <li class="log-empty">Waiting for events…</li>
+        </ol>
+        <details style="margin-top: 12px">
+          <summary>Map recording & replay</summary>
+          <div class="history-tools">
+            <label
+              >Run
+              <select id="history-source">
+                <option value="current">Current</option>
+                <option value="previous">Previous reset run</option>
+              </select></label
+            >
+            <label><input id="show-trail" type="checkbox" checked /> Flown path</label
+            ><label><input id="show-targets" type="checkbox" checked /> Selected points</label
+            ><label><input id="show-rays" type="checkbox" /> LiDAR return endpoints</label>
+            <button id="live-view">Return to live map</button
+            ><a id="download-history" href="/api/history/download" download>Download full log</a>
+          </div>
+          <input
+            id="history-slider"
+            type="range"
+            min="0"
+            max="0"
+            value="0"
+            aria-label="Recorded map frame"
+          />
+          <p id="review-status">Live map. Select a recorded frame to review earlier decisions.</p>
+          <p id="frame-evidence" class="help"></p>
+          <p id="map-quality">Provisional LiDAR map.</p>
+        </details>
+      </section>
+      <details class="card diagnostics">
+        <summary>Exploration metrics & controller details</summary>
+        <div class="diagnostic-grid">
+          <section>
+            <h3>Exploration · <span id="exploration-phase">Waiting</span></h3>
+            <p id="exploration-reason" class="help"></p>
+            <div class="metric"><span>Viewpoints reached</span><span id="viewpoints">0</span></div>
+            <div class="metric"><span>New observed area</span><span id="coverage">—</span></div>
+            <div class="metric"><span>Distance flown</span><span id="flown">—</span></div>
+            <div class="metric"><span>New area / distance</span><span id="area-per-m">—</span></div>
+            <div class="metric"><span>Simulation time</span><span id="elapsed">—</span></div>
+            <div class="metric">
+              <span>Target evaluations / switches</span><span id="switches">—</span>
+            </div>
+            <div class="metric"><span>Target potential</span><span id="potential">—</span></div>
+            <p id="reconsider-reason" class="help"></p>
+            <p id="corner-status" class="help"></p>
+          </section>
+          <section>
+            <h3>Explore and land · <span id="mission-phase">Not started</span></h3>
+            <p id="mission-reason" class="help"></p>
+            <p id="saved-map" class="help"></p>
+          </section>
+          <section>
+            <h3>Controller & clearance</h3>
+            <p id="control-profile" class="help"></p>
+            <p id="tracking-status" class="help"></p>
+            <p id="yaw-policy" class="help"></p>
+            <p id="bands" class="help"></p>
+            <details>
+              <summary>Timestamped diagnostics</summary>
+              <p id="timing-recorder" class="help">Waiting for recorder status.</p>
+              <p id="timing-errors" class="help">
+                Same-time comparisons require valid timestamped samples.
+              </p>
+              <p id="timing-pause" class="help">No pause capture yet.</p>
+              <p class="help">
+                <a href="/api/timing/download">Download latest pause evidence</a> ·
+                <a href="/api/timing/download?recording=1">Download full timing log</a>
+              </p>
+            </details>
+          </section>
+        </div>
+      </details>
     </main>
     <script>
       let token = "__TOKEN__";
@@ -482,7 +1085,14 @@
         reviewPending = false,
         renderedHistory = null,
         previewSequence = 0,
-        replaySequence = 0;
+        replaySequence = 0,
+        homePreview = null,
+        homePreviewBusy = false,
+        homePreviewSequence = 0,
+        homePreviewSource = null,
+        homePreviewNotice = "",
+        previewBusy = false,
+        disconnected = false;
       const byId = (id) => document.getElementById(id);
       const format = (v, suffix = "") => (Number.isFinite(v) ? v.toFixed(2) + suffix : "—");
       const busyRequest = () =>
@@ -494,6 +1104,315 @@
           ["sending", "received", "queued", "running"].includes(pendingRequest.status));
       const historyData = () =>
         replaySource === "previous" ? state?.previous_history : state?.history;
+      const activeStatuses = ["sending", "received", "queued", "running", "unconfirmed"];
+      function loading(id, active) {
+        byId(id).dataset.loading = String(!!active);
+        byId(id).ariaBusy = String(!!active);
+      }
+      function indicator(name, value, tone, detail, busy = false) {
+        const button = byId("state-" + name);
+        button.dataset.tone = tone;
+        byId("value-" + name).textContent = value;
+        byId("tip-" + name).textContent = detail;
+        loading("state-" + name, busy);
+      }
+      function renderCockpit() {
+        const flight = state?.flight;
+        const checks = flight?.checks || {};
+        const fresh = !disconnected && checks.telemetry_fresh === true;
+        const reviewing = !!replayFrame || replaySource === "previous";
+        const reset = state?.experiment_reset;
+        const flightBusy = !disconnected && !!state?.flight_controls?.busy;
+        const requestBusy = pendingRequest && activeStatuses.includes(pendingRequest.status);
+        byId("connection").textContent = disconnected
+          ? "Connection lost"
+          : state
+            ? "Dashboard connected"
+            : "Connecting";
+        byId("connection").dataset.tone = disconnected ? "bad" : state ? "good" : "busy";
+        loading("connection", !state && !disconnected);
+        byId("telemetry").dataset.stale = String(!fresh);
+        byId("telemetry").title = disconnected
+          ? "Last received values; dashboard connection lost"
+          : !fresh
+            ? "Last reported values; PX4 telemetry is stale"
+            : "Live flight telemetry";
+        indicator(
+          "telemetry",
+          disconnected
+            ? "Disconnected"
+            : checks.origin_fault
+              ? "Origin fault"
+              : fresh
+                ? "Live"
+                : "Waiting",
+          disconnected || checks.origin_fault ? "bad" : fresh ? "good" : "warn",
+          disconnected
+            ? "Dashboard connection lost. Displayed telemetry is the last received data; flight state is unconfirmed."
+            : checks.origin_fault
+              ? flight.next_step
+              : fresh
+                ? "Fresh PX4 vehicle state, local position and simulation clock."
+                : flight?.next_step ||
+                  "Waiting for fresh PX4 state and simulation. Keep Isaac playing.",
+          !disconnected && !fresh && !checks.origin_fault,
+        );
+        indicator(
+          "preflight",
+          !fresh
+            ? "Unknown"
+            : checks.preflight_ok === true
+              ? "Passed"
+              : checks.preflight_ok === false
+                ? "Blocked"
+                : "Unknown",
+          !fresh || checks.preflight_ok == null ? "unknown" : checks.preflight_ok ? "good" : "warn",
+          !fresh
+            ? "Preflight status needs fresh PX4 telemetry."
+            : checks.preflight_ok
+              ? "PX4 preflight checks passed; no failsafe reported."
+              : flight?.can_takeoff_reason || "Waiting for PX4 preflight checks.",
+        );
+        indicator(
+          "vehicle",
+          !fresh
+            ? "Unknown"
+            : flight.armed
+              ? "Armed"
+              : checks.landed === true
+                ? "Ground · disarmed"
+                : "Disarmed",
+          !fresh ? "unknown" : flight.armed ? "warn" : checks.landed === true ? "good" : "unknown",
+          !fresh
+            ? "Arming and landed state cannot be confirmed without fresh telemetry."
+            : "PX4 " +
+                flight.mode +
+                ". " +
+                (checks.landed === true
+                  ? "Landed"
+                  : checks.landed === false
+                    ? "Airborne"
+                    : "Landed state unknown") +
+                "; " +
+                (flight.armed ? "armed." : "disarmed."),
+        );
+        indicator(
+          "motion",
+          !fresh
+            ? "Unknown"
+            : checks.ground_origin
+              ? "Ground stable"
+              : checks.hover_stable
+                ? "Hover · 1 m"
+                : checks.stationary === true
+                  ? "Stationary"
+                  : checks.stationary === false
+                    ? "Moving"
+                    : "Unknown",
+          !fresh
+            ? "unknown"
+            : checks.ground_origin || checks.hover_stable
+              ? "good"
+              : checks.stationary === false
+                ? "busy"
+                : "warn",
+          !fresh
+            ? "Waiting for fresh motion telemetry."
+            : checks.ground_origin
+              ? "Stationary near the local ground origin; ground takeoff position confirmed."
+              : checks.hover_stable
+                ? "Stable hover at the 1 m mapping height."
+                : "Measured speed: " +
+                  format(state.measured_speed_m_s, " m/s") +
+                  ". Takeoff needs a stationary ground origin; navigation handover needs a stable 1 m hover.",
+        );
+        indicator(
+          "map",
+          disconnected
+            ? "Unconfirmed"
+            : reviewing
+              ? "Recorded"
+              : checks.origin_fault && !resetting()
+                ? "Paused"
+                : state?.map_fresh
+                  ? "Live"
+                  : resetting()
+                    ? "Resetting"
+                    : "Waiting",
+          disconnected ? "unknown" : reviewing ? "warn" : state?.map_fresh ? "good" : "warn",
+          disconnected
+            ? "Map freshness cannot be confirmed while disconnected."
+            : reviewing
+              ? "Recorded map view. The top flight readings show the current live vehicle; return to the live map to navigate."
+              : checks.origin_fault && !resetting()
+                ? "Mapping paused until recovery. " + flight.next_step
+                : state?.map_fresh
+                  ? "Live provisional LiDAR map · " +
+                    (state.scans || 0) +
+                    " scans. " +
+                    (checks.map_aligned === true
+                      ? "Coordinate alignment confirmed."
+                      : "See navigation readiness for alignment.")
+                  : state?.map_reason || "Waiting for fresh LiDAR and transforms.",
+          !disconnected && !reviewing && !checks.origin_fault && !state?.map_fresh,
+        );
+        indicator(
+          "link",
+          !fresh
+            ? "Unknown"
+            : checks.command_connected === true
+              ? "Connected"
+              : checks.command_connected === false
+                ? "No connection"
+                : "Unknown",
+          !fresh || checks.command_connected == null
+            ? "unknown"
+            : checks.command_connected
+              ? "good"
+              : "bad",
+          !fresh
+            ? "Waiting for fresh PX4 state."
+            : "PX4 command connection: " +
+                (checks.command_connected ? "connected" : "unconfirmed") +
+                ". Flight-target stream: " +
+                (checks.target_stream_ready ? "ready" : "waiting for samples") +
+                ".",
+        );
+        const navReady = fresh && state?.map_fresh && state?.ready && !reviewing && !reviewPending;
+        indicator(
+          "navigation",
+          disconnected
+            ? "Unconfirmed"
+            : reviewing || reviewPending
+              ? "Map replay"
+              : !state?.control_enabled
+                ? "Preview / locked"
+                : flightBusy
+                  ? "Flight action…"
+                  : navReady
+                    ? "Ready"
+                    : "Waiting",
+          disconnected ? "unknown" : navReady ? "good" : flightBusy ? "busy" : "warn",
+          disconnected
+            ? "Navigation state is unconfirmed while disconnected."
+            : reviewing || reviewPending
+              ? "Map replay is active. Return to the live map before selecting a navigation action. Hold and Land remain available."
+              : flightBusy
+                ? state.flight_controls.reason
+                : state?.readiness_reason ||
+                  flight?.next_step ||
+                  "Waiting for navigation readiness.",
+          flightBusy,
+        );
+        indicator(
+          "experiment",
+          disconnected
+            ? "Unconfirmed"
+            : resetting()
+              ? "Resetting…"
+              : checks.origin_fault
+                ? "Recovery needed"
+                : reset?.phase === "FAILED"
+                  ? "Reset failed"
+                  : reset
+                    ? "Ready"
+                    : "Unavailable",
+          disconnected || !reset
+            ? "unknown"
+            : checks.origin_fault || reset?.phase === "FAILED"
+              ? "bad"
+              : resetting()
+                ? "busy"
+                : "good",
+          disconnected
+            ? "Experiment status is unconfirmed while disconnected."
+            : checks.origin_fault
+              ? flight.next_step
+              : reset?.reason || "Reset requires the updated controller.",
+          !disconnected && resetting(),
+        );
+        for (const [id, action] of Object.entries({
+          go: "goal",
+          takeoff: "takeoff",
+          offboard: "offboard",
+          land: "land",
+          hold: "hold",
+          home: "home",
+          resume: "resume",
+          explore: "explore",
+          mission: "mission",
+          restart: "restart",
+        }))
+          loading(
+            id,
+            !disconnected &&
+              ((requestBusy && pendingRequest.action === action) ||
+                (id === "restart" && resetting())),
+          );
+        loading("home-preview", !disconnected && homePreviewBusy);
+        loading("flight-next", flightBusy || (!disconnected && resetting()));
+        loading("action-status", !disconnected && requestBusy);
+        byId("flight-next").dataset.tone = checks.origin_fault ? "bad" : navReady ? "good" : "warn";
+        const mapBusy =
+          !disconnected &&
+          (reviewPending ||
+            previewBusy ||
+            homePreviewBusy ||
+            resetting() ||
+            (!state?.map_fresh && !replayFrame && replaySource !== "previous"));
+        const mapBlocked = !disconnected && checks.origin_fault && !resetting() && !reviewing;
+        byId("map-loading").hidden = !mapBusy && !mapBlocked;
+        byId("map-loading").textContent = mapBlocked
+          ? "Map paused · restart required"
+          : reviewPending
+            ? "Loading recorded map…"
+            : previewBusy
+              ? "Planning destination route…"
+              : homePreviewBusy
+                ? "Planning return route…"
+                : resetting()
+                  ? "Resetting experiment…"
+                  : "Waiting for LiDAR and transforms";
+        loading("map-loading", mapBusy && !mapBlocked);
+        canvas.dataset.stale = String(disconnected || (!reviewing && !state?.map_fresh));
+        const clearance = state?.clearance_m,
+          settings = state?.settings;
+        byId("clearance-instrument").dataset.tone =
+          fresh && state?.map_fresh && Number.isFinite(clearance) && settings
+            ? clearance <= settings.stop_distance_m
+              ? "bad"
+              : clearance <= settings.slow_distance_m
+                ? "warn"
+                : "good"
+            : "unknown";
+        if (checks.origin_fault) {
+          for (const id of ["go", "takeoff", "offboard", "resume", "home", "explore", "mission"])
+            byId(id).disabled = true;
+        }
+        if (disconnected) {
+          for (const id of [
+            "go",
+            "hold",
+            "resume",
+            "home",
+            "home-preview",
+            "explore",
+            "mission",
+            "restart",
+            "takeoff",
+            "offboard",
+            "land",
+          ])
+            byId(id).disabled = true;
+          byId("phase").textContent = "DISCONNECTED";
+          byId("reason").textContent = "Live state unconfirmed · showing last received values";
+          byId("flight-next").textContent =
+            "Connection lost. Waiting for the dashboard to reconnect.";
+          byId("flight-mode").textContent = "PX4 state unconfirmed";
+          byId("map-context").textContent = "CONNECTION LOST · last received map";
+          byId("fresh").textContent = "Disconnected · last received map";
+        }
+      }
       function renderFeedback() {
         if (!pendingRequest) return;
         byId("action-status").dataset.status = pendingRequest.status;
@@ -514,6 +1433,8 @@
         pendingRequest = { id, action, status: "sending", reason: "Sending request…" };
         localNote = "";
         if (action === "restart") {
+          ++previewSequence;
+          previewBusy = false;
           ++replaySequence;
           reviewPending = false;
           replayFrame = null;
@@ -574,10 +1495,53 @@
         if (pendingRequest?.id === id && busyRequest() && attempt < 20)
           setTimeout(() => refreshReceipt(id, attempt + 1), 100);
       }
+      async function previewHome() {
+        if (
+          !state?.home_xy ||
+          !state.map_fresh ||
+          resetting() ||
+          reviewPending ||
+          replayFrame ||
+          replaySource === "previous"
+        )
+          return;
+        const sequence = ++homePreviewSequence;
+        homePreviewSource = JSON.stringify([state.history?.run_id, state.home_xy]);
+        homePreviewBusy = true;
+        homePreviewNotice = "Planning return through known space… No movement commanded.";
+        update();
+        try {
+          const response = await fetch("/api/home-route", { signal: AbortSignal.timeout(10000) });
+          const result = await response.json();
+          if (sequence !== homePreviewSequence) return;
+          if (!response.ok) throw Error(result.error || "Return preview unavailable");
+          if (
+            result.run_id !== state.history?.run_id ||
+            JSON.stringify(result.goal) !== JSON.stringify(state.home_xy)
+          )
+            throw Error("Experiment changed; request a fresh preview");
+          homePreview = result;
+          homePreviewNotice =
+            "Gold dashed return: " +
+            result.route_length_m.toFixed(2) +
+            " m · clearance preferred. Replanned when Return is pressed; finish in hover.";
+        } catch (error) {
+          if (sequence === homePreviewSequence) {
+            homePreview = null;
+            homePreviewNotice = "Return preview unavailable: " + error.message;
+          }
+        } finally {
+          if (sequence === homePreviewSequence) {
+            homePreviewBusy = false;
+            update();
+          }
+        }
+      }
       async function reviewFrame(id) {
         const sequence = ++replaySequence;
         reviewPending = true;
         byId("review-status").textContent = "Loading recorded map…";
+        update();
         try {
           const response = await fetch(
             "/api/frame?id=" + id + (replaySource === "previous" ? "&previous=1" : ""),
@@ -587,12 +1551,7 @@
           if (sequence !== replaySequence) return;
           replayFrame = frame;
           byId("review-status").textContent =
-            "RECORDED MAP · " +
-            new Date(frame.utc).toLocaleTimeString() +
-            " · " +
-            frame.phase +
-            " · " +
-            frame.reason;
+            "RECORDED MAP · " + logTime(frame.utc) + " · " + frame.phase + " · " + frame.reason;
           update();
         } catch (error) {
           byId("review-status").textContent = error.message;
@@ -602,6 +1561,14 @@
             update();
           }
         }
+      }
+      function logTime(utc) {
+        const date = new Date(utc);
+        return Number.isNaN(date.getTime())
+          ? "Time unavailable"
+          : date.toLocaleDateString("sv-SE") +
+              " " +
+              date.toLocaleTimeString("en-GB", { hour12: false });
       }
       function renderHistory() {
         const history = historyData();
@@ -646,42 +1613,84 @@
               " wall→free cells changed since the preceding recorded frame. "
             : "") +
           "These revisions may be new observations or sensor noise; they do not establish certainty.";
-        function renderList(id, rows, label) {
-          const root = byId(id);
+        const version = JSON.stringify([
+          replaySource,
+          history?.run_id,
+          history?.events,
+          history?.targets,
+        ]);
+        if (version !== renderedHistory) {
+          renderedHistory = version;
+          const targets = new Map(
+            (history?.targets || []).map((target) => [String(target.id), target]),
+          );
+          const rows = (history?.events || []).map((event) => {
+            const target = event.kind === "target_selected" ? targets.get(String(event.id)) : null;
+            if (target) targets.delete(String(event.id));
+            return { ...event, target };
+          });
+          for (const target of targets.values())
+            rows.push({ ...target, kind: "target_selected", target });
+          rows.sort(
+            (a, b) =>
+              (Date.parse(b.utc) || 0) - (Date.parse(a.utc) || 0) || Number(b.id) - Number(a.id),
+          );
+          const root = byId("event-log"),
+            scroll = root.scrollTop;
           root.replaceChildren();
-          for (const row of rows) {
+          for (const row of rows.slice(0, 160)) {
             const item = document.createElement("li");
-            item.textContent = new Date(row.utc).toLocaleTimeString() + " · " + label(row);
+            item.className = "log-row";
+            const status = row.command?.status || row.target?.status || row.phase || row.kind;
+            item.dataset.tone = /failed|rejected|expired|blocked|invalidated/i.test(status)
+              ? "bad"
+              : /unconfirmed|cancelled|superseded|abandoned/i.test(status)
+                ? "warn"
+                : /completed|reached|ready/i.test(status)
+                  ? "good"
+                  : "busy";
+            const time = document.createElement("time");
+            time.dateTime = row.utc;
+            time.textContent = logTime(row.utc);
+            const kind = document.createElement("span");
+            kind.className = "log-kind";
+            kind.textContent = row.target
+              ? "Target / " + row.target.status
+              : row.command
+                ? row.command.action + " / " + row.command.status
+                : row.phase || row.kind;
+            const message = document.createElement("span");
+            message.className = "log-message";
+            message.textContent =
+              (row.target
+                ? "#" +
+                  row.target.id +
+                  " · (" +
+                  row.target.xy.map((v) => v.toFixed(1)).join(", ") +
+                  ") m · "
+                : "") + (row.reason || "");
+            item.append(time);
+            item.append(kind);
+            item.append(message);
             if (row.frame_id) {
               const button = document.createElement("button");
-              button.textContent = "Map then";
+              button.textContent = "View map";
               button.onclick = () => reviewFrame(row.frame_id);
               item.append(button);
             }
             root.append(item);
           }
-        }
-        const version = replaySource + ":" + history?.run_id + ":" + history?.events?.at(-1)?.id;
-        if (version !== renderedHistory) {
-          renderedHistory = version;
-          renderList(
-            "point-history",
-            (history?.targets || []).slice(-100).reverse(),
-            (row) =>
-              "#" +
-              row.id +
-              " (" +
-              row.xy.map((n) => n.toFixed(1)).join(", ") +
-              ") · " +
-              row.status +
-              " · " +
-              row.reason,
-          );
-          renderList(
-            "decision-history",
-            (history?.events || []).slice(-80).reverse(),
-            (row) => (row.phase || row.kind) + " · " + row.reason,
-          );
+          if (!rows.length) {
+            const empty = document.createElement("li");
+            empty.className = "log-empty";
+            empty.textContent =
+              "No events in this run yet. Targets, decisions and command responses appear here.";
+            root.append(empty);
+          }
+          root.scrollTop = scroll;
+          byId("log-count").textContent = rows.length
+            ? "Latest first · " + Math.min(rows.length, 160) + " of " + rows.length + " events"
+            : "Latest first";
         }
         if (history?.error || history?.dropped_records)
           byId("map-quality").textContent +=
@@ -818,6 +1827,20 @@
               cell + 0.2,
             );
           }
+        if (byId("show-centers").checked && view.centerline) {
+          ctx.fillStyle = "#79b6b1";
+          for (let i = 0; i < view.centerline.length; i++) {
+            if (view.centerline[i] !== "1") continue;
+            const x = i % width,
+              y = Math.floor(i / width);
+            ctx.fillRect(
+              p.left + (x + 0.25) * cell,
+              p.top + (height - y - 0.75) * cell,
+              Math.max(1, cell * 0.5),
+              Math.max(1, cell * 0.5),
+            );
+          }
+        }
         ctx.fillStyle = "#f0d670";
         for (let y = 1; y < height - 1; y++)
           for (let x = 1; x < width - 1; x++) {
@@ -880,6 +1903,29 @@
           }
         route(view.preview, true);
         route(view.path, false);
+        for (const frontier of view.exploration?.frontier_catalog?.frontiers || []) {
+          if (["merged", "resolved"].includes(frontier.status)) continue;
+          ctx.fillStyle =
+            frontier.status === "active"
+              ? "#58d6e6"
+              : frontier.status === "filtered"
+                ? "#8794a2"
+                : "#d5b7ef";
+          for (const point of frontier.boundary_points_xy || []) {
+            const p = screen(point);
+            ctx.fillRect(p[0] - 2, p[1] - 2, 4, 4);
+          }
+          if (frontier.midpoint_xy) {
+            const p = screen(frontier.midpoint_xy);
+            ctx.fillText(
+              "F" + frontier.id + " · " + frontier.span_m.toFixed(1) + " m",
+              p[0],
+              p[1] - 8,
+            );
+          }
+        }
+        if (!replayFrame && replaySource !== "previous" && homePreview)
+          route(homePreview.path, true, "#ffd579");
         if (view.home_xy) {
           const a = screen(view.home_xy);
           ctx.fillStyle = "#ffd579";
@@ -937,6 +1983,7 @@
       }
       function update() {
         if (!state) {
+          renderCockpit();
           renderFeedback();
           return;
         }
@@ -953,14 +2000,24 @@
             ? "RECORDED MAP · " + new Date(replayFrame.utc).toLocaleString()
             : replaySource === "previous"
               ? "PREVIOUS RUN · no recorded map selected"
-              : "LIVE MAP · provisional LiDAR observations";
+              : state.map_fresh
+                ? "LIVE MAP · provisional LiDAR observations"
+                : "MAP STALE · waiting for fresh LiDAR";
         const reset = state.experiment_reset;
         const flight = state.flight;
         const flightBusy = !!state.flight_controls?.busy;
-        byId("flight-next").textContent =
-          flight?.next_step || "Waiting for the controller's flight setup status";
+        byId("flight-next").textContent = flightBusy
+          ? state.flight_controls.reason
+          : flight?.next_step || "Waiting for the controller's flight setup status";
         byId("flight-mode").textContent = flight
-          ? "PX4: " + flight.mode + " · " + (flight.armed ? "Armed" : "Disarmed")
+          ? "PX4: " +
+            flight.mode +
+            " · " +
+            (flight.mode === "Unavailable" || flight.checks?.telemetry_fresh === false
+              ? "Unconfirmed"
+              : flight.armed
+                ? "Armed"
+                : "Disarmed")
           : "PX4 mode unavailable";
         byId("flight-action").textContent = state.flight_controls
           ? state.flight_controls.phase + " · " + state.flight_controls.reason
@@ -975,13 +2032,62 @@
         const groundAfterReset =
           reset?.phase === "READY" && !state.map_fresh && state.observed_cells === 0;
         byId("mode").textContent = state.control_enabled
-          ? "Goal controller · use Flight setup to prepare navigation"
-          : "Map preview · flight controls disabled";
+          ? "Local navigation · 1 m operating height"
+          : "Preview / controls locked";
         byId("phase").textContent = groundAfterReset ? "GROUND" : state.phase || "Waiting";
         byId("reason").textContent = groundAfterReset
           ? "Reset complete. Disarmed on the ground; mapping resumes at the 1 m hover."
           : state.reason || state.map_reason;
+        if (
+          state.phase === "PAUSED" &&
+          state.reason?.startsWith("Simulation clock") &&
+          state.trajectory_clock?.available
+        )
+          byId("reason").textContent =
+            "Clock recovered; navigation remains paused after a timing gap. Resume replans from the current position.";
+        const diagnostic = state.timing_diagnostics;
+        const counts = diagnostic?.stream_counts || {};
+        byId("timing-recorder").textContent = diagnostic?.recording
+          ? "Recording · Isaac " +
+            (counts.isaac_truth || 0) +
+            " · native PX4 " +
+            (counts.px4_position || 0) +
+            " · references " +
+            (counts.reference || 0) +
+            " · recorder drops " +
+            (diagnostic.dropped_records || 0) +
+            " · sequence gaps " +
+            (diagnostic.sequence_gaps || 0)
+          : "Timestamped recorder unavailable or stale.";
+        const evidence = diagnostic?.latest;
+        const estimate = evidence?.estimation_error_m;
+        const tracking = evidence?.intended_tracking_error_m;
+        byId("timing-errors").textContent = estimate?.samples
+          ? "Same-time Isaac/PX4 error p95 " +
+            format(estimate.p95, " m") +
+            " (" +
+            estimate.samples +
+            " samples). Intended-route tracking p95 " +
+            (tracking?.samples ? format(tracking.p95, " m") : "insufficient evidence") +
+            ". These diagnostics do not change flight thresholds."
+          : "Insufficient aligned evidence. Requires Isaac truth, valid native PX4 position, and a captured coordinate alignment.";
+        const incident = diagnostic?.last_incident;
+        const stoppedClock = incident?.summary?.stop?.clock;
+        byId("timing-pause").textContent = incident
+          ? "Latest pause: " +
+            incident.reason +
+            (stoppedClock
+              ? " · clock: " +
+                stoppedClock.consume_reason +
+                " · source age " +
+                format(stoppedClock.source_age_wall_s, " s")
+              : "")
+          : "No pause capture yet. A pause saves 10 seconds before and 2 seconds after the event.";
         byId("readiness").textContent = state.readiness_reason || "";
+        byId("runtime-status").hidden = !state.runtime?.reload_pending;
+        byId("runtime-status").textContent = state.runtime?.reload_pending
+          ? "Updates waiting. Restart experiment will load the new controller and settings."
+          : "";
         byId("goal").textContent =
           selected || state.goal || state.preview_goal
             ? (selected || state.goal || state.preview_goal).map((v) => v.toFixed(1)).join(", ") +
@@ -989,7 +2095,7 @@
             : "—";
         byId("remaining").textContent = format(state.remaining_m, " m");
         byId("distance").textContent = format(state.clearance_m, " m");
-        byId("speed").textContent = format(state.speed_m_s || 0, " m/s");
+        byId("speed").textContent = format(state.speed_m_s, " m/s");
         byId("height").textContent = format(state.height_m, " m");
         const heading = (radians) =>
           Number.isFinite(radians)
@@ -1000,10 +2106,23 @@
         byId("yaw-policy").textContent =
           state.yaw_mode === "face_route_smoothly"
             ? "Faces the route smoothly · up to " +
-              state.settings.yaw_rate_deg_s +
+              state.settings?.yaw_rate_deg_s +
               "°/s; holds heading when stopped."
             : "Running controller holds a fixed heading.";
         byId("actual-speed").textContent = format(state.measured_speed_m_s, " m/s");
+        byId("tracking-status").textContent = state.tracking
+          ? "Tracking error " +
+            format(state.tracking.error_m, " m") +
+            " · speed permission " +
+            Math.round(100 * (state.tracking.speed_scale ?? 1)) +
+            "% · pauses above 0.35 m."
+          : "Tracking diagnostics appear during navigation.";
+        byId("control-profile").textContent =
+          state.control_profile === "position_with_route_velocity_feedforward"
+            ? "Position + route velocity · " +
+              state.target_stream_hz +
+              " Hz. Speed is limited by braking, bends and tracking."
+            : "Position targets only; tracking may limit actual speed.";
         byId("fresh").textContent = state.map_fresh
           ? "Live · " + state.scans + " scans"
           : groundAfterReset
@@ -1038,8 +2157,33 @@
               ? "Returning / holding at home."
               : "Return through known clear space; finish in hover.")
           : state.route_planner === "optimizedRoutePlanner"
-            ? "Home not captured yet: waiting for the first stable mapped hover."
+            ? "Start H not captured yet: waiting for the first stable mapped hover. " +
+              (state.flight?.next_step || "")
             : "Return home requires reloading the updated navigator; the current run is unchanged.";
+        if (
+          (homePreview || homePreviewBusy) &&
+          (resetting() ||
+            homePreviewSource !== JSON.stringify([state.history?.run_id, state.home_xy]))
+        ) {
+          ++homePreviewSequence;
+          homePreviewBusy = false;
+          homePreview = null;
+          homePreviewNotice = "Preview cleared: start point or experiment changed.";
+        }
+        byId("home-preview").disabled =
+          !state.home_xy ||
+          !state.map_fresh ||
+          homePreviewBusy ||
+          resetting() ||
+          reviewPending ||
+          !!replayFrame ||
+          replaySource === "previous";
+        byId("home-preview-status").textContent =
+          homePreviewNotice ||
+          "Preview draws a gold dashed route without moving the drone. Return finishes hovering.";
+        byId("home").title = state.home_xy
+          ? "Plan to start H using known space, then hover"
+          : "Start is captured after the first stable mapped hover";
         byId("explore").disabled =
           !state.control_enabled ||
           flightBusy ||
@@ -1086,12 +2230,40 @@
           (exp?.reconsiderations || 0) + " / " + (exp?.target_switches || 0);
         byId("potential").textContent = format(exp?.current_target_gain_m2, " m²");
         byId("reconsider-reason").textContent = exp?.reconsider_reason || "";
+        const catalog = exp?.frontier_catalog;
+        byId("frontier-summary").textContent = catalog
+          ? catalog.pending +
+            " unresolved · " +
+            catalog.resolved +
+            " resolved · " +
+            (catalog.filtered || 0) +
+            " below 1.5 m span. Distances follow planned flight routes."
+          : "Frontiers appear from fresh map observations.";
+        const frontierRows = (catalog?.frontiers || []).map((frontier) => {
+          const row = document.createElement("p");
+          row.textContent =
+            "F" +
+            frontier.id +
+            " · " +
+            frontier.status +
+            (Number.isFinite(frontier.span_m)
+              ? " · " + frontier.span_m.toFixed(1) + " m span"
+              : "") +
+            " · " +
+            (Number.isFinite(frontier.route_length_m)
+              ? frontier.route_length_m.toFixed(1) + " m route"
+              : "route not available") +
+            " · " +
+            frontier.reason;
+          return row;
+        });
+        byId("frontier-list").replaceChildren(...frontierRows);
         byId("corner-status").textContent = exp?.policy
           ? exp.corner_xy
             ? "Wall-ending viewpoint · estimated hidden area " +
               format(exp.hidden_area_m2, " m²") +
               ". Amber square marks the wall, not a flight destination."
-            : "Corner-aware: no useful reachable wall-ending view selected; using an ordinary frontier."
+            : "Nearest reachable frontier first; active boundaries stay selected until resolved or no longer actionable."
           : "Corner-aware exploration requires the updated navigator.";
         if (state.settings) {
           const s = state.settings;
@@ -1114,6 +2286,7 @@
             ).toFixed(2) +
             " m of forward obstacle clearance. Green indicates mapped traversable space, not a guaranteed speed.";
         }
+        renderCockpit();
         renderHistory();
         draw();
       }
@@ -1130,6 +2303,7 @@
         ];
         const sequence = ++previewSequence;
         selected = null;
+        previewBusy = true;
         localNote = "Calculating route preview…";
         update();
         try {
@@ -1145,6 +2319,8 @@
           if (sequence !== previewSequence) return;
           selected = null;
           localNote = err.message;
+        } finally {
+          if (sequence === previewSequence) previewBusy = false;
         }
         update();
       });
@@ -1169,6 +2345,8 @@
         byId("review-status").textContent = "Live map";
         update();
       };
+      byId("home-preview").onclick = previewHome;
+      byId("show-centers").onchange = draw;
       byId("show-trail").onchange = draw;
       byId("show-targets").onchange = draw;
       byId("show-rays").onchange = draw;
@@ -1190,23 +2368,17 @@
       async function poll() {
         try {
           const r = await fetch("/api/state", { signal: AbortSignal.timeout(3000) });
+          if (!r.ok) throw Error("Dashboard state unavailable");
           state = await r.json();
+          disconnected = false;
           update();
         } catch {
-          byId("fresh").textContent = "Disconnected";
-          byId("go").disabled = true;
-          byId("hold").disabled = true;
-          byId("resume").disabled = true;
-          byId("home").disabled = true;
-          byId("explore").disabled = true;
-          byId("mission").disabled = true;
-          byId("restart").disabled = true;
-          byId("takeoff").disabled = true;
-          byId("offboard").disabled = true;
-          byId("land").disabled = true;
+          disconnected = true;
+          renderCockpit();
         }
         setTimeout(poll, 500);
       }
+      renderCockpit();
       draw();
       poll();
     </script>

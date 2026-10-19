@@ -4,6 +4,7 @@ import heapq
 from collections import deque
 import math
 import numpy as np
+from .centering import routing_geometry
 
 
 NEIGHBOURS = [(dy, dx, math.hypot(dx, dy)) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx]
@@ -28,7 +29,13 @@ def segment_safe(mask, a, b):
     return True
 
 
-def astar(mask, start, goal):
+def astar(mask, start, goal, traversal_cost=None):
+    if traversal_cost is not None and (
+        traversal_cost.shape != mask.shape
+        or not np.isfinite(traversal_cost[mask]).all()
+        or np.any(traversal_cost[mask] < 1)
+    ):
+        raise ValueError("Traversal costs must be finite and at least one")
     if not mask[start] or not mask[goal]:
         raise ValueError("Start or destination is outside the traversable map")
     queue = [(math.dist(start, goal), 0.0, start)]
@@ -50,7 +57,10 @@ def astar(mask, start, goal):
                 continue
             if dy and dx and (not mask[cell[0] + dy, cell[1]] or not mask[cell[0], cell[1] + dx]):
                 continue
-            new = g + distance
+            weight = (
+                1.0 if traversal_cost is None else (traversal_cost[cell] + traversal_cost[nxt]) / 2
+            )
+            new = g + distance * weight
             if new < cost.get(nxt, math.inf):
                 cost[nxt] = new
                 parent[nxt] = cell
@@ -168,6 +178,25 @@ def route_distances(snapshot, start_xy):
     return distances
 
 
+def path_cost(cells, traversal_cost):
+    return sum(
+        math.dist(a, b) * (traversal_cost[a] + traversal_cost[b]) / 2
+        for a, b in zip(cells, cells[1:])
+    )
+
+
+def segment_cost(a, b, traversal_cost):
+    # Integrate over the physical straight segment, not the length of rounded
+    # grid steps. Half-cell rounding can otherwise make a diagonal look like
+    # a longer staircase and leave dozens of unnecessary braking waypoints.
+    count = max(abs(b[0] - a[0]), abs(b[1] - a[1])) * 2 + 1
+    if count == 1:
+        return 0.0
+    samples = np.rint(np.linspace(a, b, count)).astype(int)
+    values = traversal_cost[samples[:, 0], samples[:, 1]]
+    return float((values[:-1] + values[1:]).sum() * math.dist(a, b) / (2 * (count - 1)))
+
+
 def plan(snapshot, start_xy, goal_xy):
     model = snapshot.model
     start, goal = model.cell(start_xy), model.cell(goal_xy)
@@ -177,13 +206,20 @@ def plan(snapshot, start_xy, goal_xy):
         raise ValueError("Choose an observed destination outside the obstacle margin")
     escape = escape_start(snapshot, start)
     start = escape[-1]
-    route = astar(snapshot.safe, start, goal)
+    _, _, cost = routing_geometry(snapshot)
+    route = astar(snapshot.safe, start, goal, cost)
+    prefix = [0.0]
+    for a, b in zip(route, route[1:]):
+        prefix.append(prefix[-1] + path_cost([a, b], cost))
     # Shortcuts must preserve inflated obstacles and unknown-space exclusions.
     smooth = [route[0]]
     i = 0
     while i < len(route) - 1:
         j = len(route) - 1
-        while j > i + 1 and not segment_safe(snapshot.safe, route[i], route[j]):
+        while j > i + 1 and not (
+            segment_safe(snapshot.safe, route[i], route[j])
+            and segment_cost(route[i], route[j], cost) <= (prefix[j] - prefix[i]) * 1.02 + 1e-9
+        ):
             j -= 1
         smooth.append(route[j])
         i = j
@@ -199,4 +235,19 @@ def plan(snapshot, start_xy, goal_xy):
         for a, b in zip(world, world[1:])
     ):
         raise ValueError("Route shortcut crosses insufficiently observed space")
-    return world
+    from .curves import rounded_route
+
+    def acceptable(candidate, original):
+        candidate_cells = [model.cell(p) for p in candidate]
+        # Rounding cannot cut into the inflation margin or unknown cells. A
+        # near-wall escape remains straight until it reaches the safe mask.
+        if not all(
+            segment_safe(snapshot.safe, a, b) for a, b in zip(candidate_cells, candidate_cells[1:])
+        ):
+            return False
+        old = [model.cell(p) for p in original]
+        before = sum(segment_cost(a, b, cost) for a, b in zip(old, old[1:]))
+        after = sum(segment_cost(a, b, cost) for a, b in zip(candidate_cells, candidate_cells[1:]))
+        return after <= before * 1.02 + 1e-9
+
+    return rounded_route(world, acceptable)

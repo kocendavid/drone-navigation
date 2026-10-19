@@ -32,8 +32,8 @@ function dashboard() {
         height: 900,
         getContext: () => drawing,
         addEventListener() {},
-        replaceChildren() {
-          this.children = [];
+        replaceChildren(...nodes) {
+          this.children = [...nodes];
         },
         append(node) {
           this.children.push(node);
@@ -57,7 +57,7 @@ function dashboard() {
   vm.createContext(sandbox);
   vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], sandbox);
   vm.runInContext(
-    "globalThis.api={setState(s){state=s;update();},sendAction,refreshReceipt,reviewFrame,pending(){return pendingRequest;},replay(){return replayFrame;}}",
+    "globalThis.api={setState(s){state=s;update();},sendAction,refreshReceipt,reviewFrame,poll,pending(){return pendingRequest;},replay(){return replayFrame;}}",
     sandbox,
   );
   const state = {
@@ -354,7 +354,7 @@ function dashboard() {
     d.state.yaw_reference_ned_rad = Math.PI / 2;
     d.state.settings = {
       yaw_rate_deg_s: 45,
-      cruise_m_s: 1.0,
+      cruise_m_s: 4.0,
       slow_distance_m: 1.0,
       stop_distance_m: 0.65,
       obstacle_margin_m: 0.8,
@@ -365,8 +365,12 @@ function dashboard() {
     assert.equal(d.element("yaw-measured").textContent, "270.0°");
     assert.equal(d.element("yaw-reference").textContent, "90.0°");
     assert.match(d.element("yaw-policy").textContent, /45°\/s/);
-    assert.match(d.element("bands").textContent, /up to 1 m\/s/);
-    assert.match(d.element("bands").textContent, /3\.15 m/);
+    assert.match(d.element("bands").textContent, /up to 4 m\/s/);
+    assert.match(d.element("bands").textContent, /34\.65 m/);
+    d.state.control_profile = "position_with_route_velocity_feedforward";
+    d.state.target_stream_hz = 20;
+    d.sandbox.api.setState(d.state);
+    assert.match(d.element("control-profile").textContent, /Position \+ route velocity.*20 Hz/);
   }
   {
     const d = dashboard();
@@ -385,6 +389,8 @@ function dashboard() {
     const d = dashboard();
     assert.equal(d.element("home").disabled, true);
     d.state.route_planner = "optimizedRoutePlanner";
+    d.sandbox.api.setState(d.state);
+    assert.match(d.element("home-status").textContent, /not captured/);
     d.state.home_xy = [0.5, -0.75];
     d.sandbox.api.setState(d.state);
     assert.equal(d.element("home").disabled, false);
@@ -415,6 +421,68 @@ function dashboard() {
   }
   {
     const d = dashboard();
+    d.state.home_xy = [0.5, -0.75];
+    d.state.route_planner = "optimizedRoutePlanner";
+    d.sandbox.api.setState(d.state);
+    const requests = [];
+    d.sandbox.fetch = async (url, options) => {
+      requests.push([url, options]);
+      return {
+        ok: true,
+        json: async () => ({
+          run_id: "test",
+          goal: [0.5, -0.75],
+          path: [
+            [0, 0],
+            [0.5, -0.75],
+          ],
+          route_length_m: 0.91,
+        }),
+      };
+    };
+    await d.element("home-preview").onclick();
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0][0], "/api/home-route");
+    assert.equal(requests[0][1].method, undefined, "preview must only read a route");
+    assert.match(d.element("home-preview-status").textContent, /0.91 m/);
+    assert.equal(d.sandbox.api.pending(), null, "preview must not create a flight command");
+    d.state.home_xy = null;
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("home-preview").disabled, true);
+    assert.match(d.element("home-preview-status").textContent, /cleared/);
+  }
+  {
+    const d = dashboard();
+    d.state.home_xy = [0.5, -0.75];
+    d.state.route_planner = "optimizedRoutePlanner";
+    d.sandbox.api.setState(d.state);
+    let respond;
+    d.sandbox.fetch = () =>
+      new Promise((resolve) => {
+        respond = resolve;
+      });
+    const pending = d.element("home-preview").onclick();
+    assert.match(d.element("home-preview-status").textContent, /Planning return/);
+    d.state.experiment_reset.busy = true;
+    d.sandbox.api.setState(d.state);
+    respond({
+      ok: true,
+      json: async () => ({
+        run_id: "test",
+        goal: [0.5, -0.75],
+        path: [
+          [0, 0],
+          [0.5, -0.75],
+        ],
+        route_length_m: 0.91,
+      }),
+    });
+    await pending;
+    assert.match(d.element("home-preview-status").textContent, /cleared/);
+    assert.equal(d.element("home-preview").disabled, true);
+  }
+  {
+    const d = dashboard();
     d.state.route_planner = "optimizedRoutePlanner";
     d.state.home_xy = [0.5, -0.75];
     d.sandbox.api.setState(d.state);
@@ -427,7 +495,239 @@ function dashboard() {
     assert.deepEqual(d.state.home_xy, [0.5, -0.75]);
     assert.deepEqual(Array.from(d.sandbox.api.replay().home_xy), [-0.5, 0.75]);
   }
-  console.log("15 dashboard interaction checks passed");
+  {
+    const d = dashboard();
+    assert.equal(d.element("state-preflight").dataset.tone, "unknown");
+    assert.equal(d.element("value-vehicle").textContent, "Unknown");
+    d.state.flight = {
+      mode: "Hold",
+      armed: false,
+      next_step: "Take off when ready",
+      checks: {
+        telemetry_fresh: true,
+        preflight_ok: false,
+        landed: true,
+        stationary: true,
+        ground_origin: true,
+        command_connected: true,
+      },
+    };
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("value-preflight").textContent, "Blocked");
+    assert.equal(d.element("state-preflight").dataset.tone, "warn");
+    assert.equal(d.element("value-vehicle").textContent, "Ground · disarmed");
+    assert.equal(d.element("value-motion").textContent, "Ground stable");
+    assert.match(d.element("tip-motion").textContent, /ground origin/);
+    d.state.flight.checks.telemetry_fresh = false;
+    d.sandbox.api.setState(d.state);
+    assert.equal(
+      d.element("value-vehicle").textContent,
+      "Unknown",
+      "stale disarmed state must not look confirmed",
+    );
+    assert.equal(d.element("state-preflight").dataset.tone, "unknown");
+    assert.equal(d.element("telemetry").dataset.stale, "true");
+    assert.match(d.element("flight-mode").textContent, /Unconfirmed/);
+    assert.equal(d.element("state-navigation").dataset.tone, "warn");
+  }
+  {
+    const d = dashboard();
+    d.state.flight = {
+      next_step: "Restart experiment to recover the origin change",
+      checks: { telemetry_fresh: false, origin_fault: true },
+    };
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("state-telemetry").dataset.tone, "bad");
+    assert.equal(d.element("value-experiment").textContent, "Recovery needed");
+    assert.match(d.element("tip-experiment").textContent, /Restart experiment/);
+    assert.equal(d.element("map-loading").dataset.loading, "false");
+    assert.match(d.element("map-loading").textContent, /restart required/);
+    assert.equal(d.element("value-map").textContent, "Paused");
+    assert.equal(d.element("go").disabled, true);
+    assert.equal(d.element("restart").disabled, false);
+    assert.equal(d.element("hold").disabled, false);
+    assert.equal(
+      d.element("state-telemetry").dataset.loading,
+      "false",
+      "origin faults require recovery, not an endless loading state",
+    );
+  }
+  {
+    const d = dashboard();
+    let respond;
+    d.sandbox.fetch = () =>
+      new Promise((resolve) => {
+        respond = resolve;
+      });
+    const request = d.sandbox.api.sendAction("takeoff");
+    assert.equal(d.element("takeoff").dataset.loading, "true");
+    assert.equal(d.element("takeoff").ariaBusy, "true");
+    const pending = d.sandbox.api.pending();
+    respond({
+      ok: true,
+      json: async () => ({
+        command: { ...pending, status: "running", reason: "Waiting for hover" },
+      }),
+    });
+    await request;
+    assert.equal(d.element("takeoff").dataset.loading, "true");
+    d.state.commands = [{ ...pending, status: "completed", reason: "Hover confirmed" }];
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("takeoff").dataset.loading, "false");
+    assert.equal(d.element("action-status").dataset.loading, "false");
+  }
+  {
+    const d = dashboard();
+    let respond;
+    d.sandbox.fetch = () =>
+      new Promise((resolve) => {
+        respond = resolve;
+      });
+    const request = d.sandbox.api.reviewFrame(2);
+    assert.equal(d.element("map-loading").hidden, false);
+    assert.match(d.element("map-loading").textContent, /Loading recorded map/);
+    assert.equal(d.element("go").disabled, true, "controls lock as soon as replay loading begins");
+    respond({ ok: true, json: async () => ({ ...d.state, id: 2, utc: "2026-10-19T08:00:00Z" }) });
+    await request;
+    assert.equal(d.element("map-loading").hidden, true);
+    assert.equal(d.element("value-map").textContent, "Recorded");
+    assert.equal(d.element("value-navigation").textContent, "Map replay");
+  }
+  {
+    const d = dashboard();
+    d.state.flight = {
+      mode: "Offboard",
+      armed: true,
+      checks: { telemetry_fresh: true, preflight_ok: true },
+    };
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("state-navigation").dataset.tone, "good");
+    d.sandbox.fetch = async () => {
+      throw Error("Connection lost");
+    };
+    await d.sandbox.api.poll();
+    assert.equal(d.element("phase").textContent, "DISCONNECTED");
+    assert.equal(d.element("value-vehicle").textContent, "Unknown");
+    assert.equal(d.element("state-navigation").dataset.tone, "unknown");
+    assert.equal(d.element("telemetry").dataset.stale, "true");
+    // A late route/receipt response can call update after a failed state poll.
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("go").disabled, true);
+    assert.equal(d.element("phase").textContent, "DISCONNECTED");
+    d.sandbox.fetch = async () => ({ ok: true, json: async () => d.state });
+    await d.sandbox.api.poll();
+    assert.equal(d.element("state-navigation").dataset.tone, "good");
+    assert.equal(d.element("telemetry").dataset.stale, "false");
+    assert.equal(d.element("go").disabled, false);
+  }
+  {
+    const d = dashboard();
+    const target = {
+      id: 1,
+      utc: "2026-10-19T08:00:00Z",
+      xy: [1, 2],
+      status: "selected",
+      reason: "Target selected",
+      frame_id: 1,
+    };
+    d.state.history.targets = [target];
+    d.state.history.events = [
+      { id: 1, utc: target.utc, kind: "target_selected", reason: "Target selected", frame_id: 1 },
+      {
+        id: 2,
+        utc: "2026-10-19T08:01:00Z",
+        kind: "command",
+        command: { action: "explore", status: "rejected" },
+        reason: "Waiting for checks",
+      },
+    ];
+    d.sandbox.api.setState(d.state);
+    const rows = d.element("event-log").children;
+    assert.equal(rows.length, 2, "target summaries merge with their selection event");
+    assert.equal(rows[0].dataset.tone, "bad");
+    assert.equal(rows[0].children[1].textContent, "explore / rejected");
+    assert.match(rows[0].children[0].textContent, /^2026-10-19 \d{2}:\d{2}:\d{2}$/);
+    assert.equal(rows[1].children[3].textContent, "View map");
+    target.status = "superseded";
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("event-log").children[1].dataset.tone, "warn");
+    assert.equal(
+      d.element("event-log").children[1].children[1].textContent,
+      "Target / superseded",
+      "target changes render even without a new event",
+    );
+  }
+  {
+    const d = dashboard();
+    d.state.runtime = { reload_pending: true };
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("runtime-status").hidden, false);
+    assert.match(d.element("runtime-status").textContent, /Updates waiting/);
+    d.state.runtime.reload_pending = false;
+    d.sandbox.api.setState(d.state);
+    assert.equal(d.element("runtime-status").hidden, true);
+  }
+  {
+    const d = dashboard();
+    d.state.exploration = {
+      frontier_catalog: {
+        pending: 2,
+        resolved: 1,
+        frontiers: [
+          {
+            id: 2,
+            status: "active",
+            span_m: 2.6,
+            midpoint_xy: [1, 1],
+            boundary_points_xy: [
+              [0, 1],
+              [1, 1],
+              [2, 1],
+            ],
+            route_length_m: 4.25,
+            reason: "Reachable route",
+          },
+          { id: 3, status: "unreachable", route_length_m: null, reason: "Unknown space remains" },
+        ],
+      },
+    };
+    d.sandbox.api.setState(d.state);
+    assert.match(d.element("frontier-summary").textContent, /2 unresolved · 1 resolved/);
+    const rows = d.element("frontier-list").children;
+    assert.equal(rows.length, 2);
+    assert.match(rows[0].textContent, /F2 · active · 2.6 m span · 4.3 m route/);
+    assert.ok(d.drawn.includes("F2 · 2.6 m"), "frontier extent is labeled on the map");
+    assert.match(rows[1].textContent, /F3 · unreachable · route not available/);
+  }
+  {
+    const d = dashboard();
+    d.state.phase = "PAUSED";
+    d.state.reason = "Simulation clock unavailable or discontinuous; hold until Resume";
+    d.state.trajectory_clock = { available: true };
+    d.state.timing_diagnostics = {
+      recording: true,
+      stream_counts: { isaac_truth: 20, px4_position: 15, reference: 10 },
+      latest: { estimation_error_m: { samples: 0 } },
+      last_incident: {
+        reason: "Clock delayed",
+        summary: {
+          stop: { clock: { consume_reason: "clock_update_stale", source_age_wall_s: 0.4 } },
+        },
+      },
+    };
+    d.sandbox.api.setState(d.state);
+    assert.match(d.element("reason").textContent, /Clock recovered/);
+    assert.match(
+      d.element("timing-recorder").textContent,
+      /Recording · Isaac 20 · native PX4 15 · references 10/,
+    );
+    assert.match(d.element("timing-errors").textContent, /Insufficient aligned evidence/);
+    assert.match(d.element("timing-pause").textContent, /clock_update_stale/);
+    d.state.timing_diagnostics.recording = false;
+    d.sandbox.api.setState(d.state);
+    assert.match(d.element("timing-recorder").textContent, /unavailable or stale/);
+  }
+  console.log("26 dashboard interaction checks passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

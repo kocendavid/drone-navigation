@@ -9,7 +9,7 @@
   "physics_hz": 250,
   "actuator_timeout_s": 0.5,
   "body_flu_quaternion_wxyz": [1, 0, 0, 0],
-  "vehicle_mass_kg": null,
+  "vehicle_mass_kg": 1.5,
   "omega_max_rad_s": 900,
   "hover_command": 0.5,
   "k_f": null,
@@ -26,7 +26,7 @@
   "sensor_noise_std": {
     "accel_m_s2": 0.005,
     "gyro_rad_s": 0.002,
-    "mag_gauss": 0.00001,
+    "mag_gauss": 1e-5,
     "pressure_hpa": 0.001
   },
   "rotors": [
@@ -58,5 +58,17 @@
       "position_flu_m": [-0.10253, -0.10253, 0],
       "yaw_torque_sign": 1
     }
-  ]
+  ],
+  "link_masses_kg": {
+    "/World/quadcopter/chassis": 0.28101581669137016,
+    "/World/quadcopter/rotor_arm0": 0.004995836697503105,
+    "/World/quadcopter/rotor0": 0.2997502091296544,
+    "/World/quadcopter/rotor_arm1": 0.004995836697503105,
+    "/World/quadcopter/rotor1": 0.2997502091296544,
+    "/World/quadcopter/rotor_arm2": 0.004995836697503105,
+    "/World/quadcopter/rotor2": 0.2997502091296544,
+    "/World/quadcopter/rotor_arm3": 0.004995836697503105,
+    "/World/quadcopter/rotor3": 0.2997502091296544
+  },
+  "rigid_frame": true
 }

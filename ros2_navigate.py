@@ -6,6 +6,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 import math
+import sys
 from pathlib import Path
 from queue import Empty, Full, Queue
 import threading
@@ -25,7 +26,8 @@ from ros2_step import SimulationPacer, topic_for
 from navigation.feed import MapFeed
 from navigation.dashboard import Dashboard
 from navigation.motion import FrameAlignment, RouteFollower, clearance_ahead, smooth_yaw
-from navigation.planning import plan, segment_safe
+from navigation.planning import plan, segment_safe, segment_cost
+from navigation.centering import routing_geometry
 from navigation.exploration import ExplorationSession, choose_frontier, visible_unknown
 from navigation.settings import load_settings
 from navigation.mission import ExploreMission, assess_completion, save_map
@@ -33,11 +35,17 @@ from navigation.ros_map import RosMapPublisher
 from navigation.reset import ExperimentReset, EmptyFeed
 from navigation.history import RunHistory
 from navigation.flight_controls import FlightControls, NativeFlightBackend
+from navigation.runtime import RuntimeVersion, prepare_reload, restore_reload, RELOAD_EXIT_CODE
+from navigation.diagnostic_wire import DiagnosticEmitter
+from navigation.diagnostics import finite
+
+RUNTIME = RuntimeVersion(Path(__file__).parent)
 
 
 class GoalNavigator(HoverPublisher):
     def __init__(self, feed, dashboard, commands, settings=None):
         self.feed = feed
+        self.diagnostics = DiagnosticEmitter("navigator")
         self.dashboard = dashboard
         self.commands = commands
         self.settings = settings or load_settings()
@@ -58,7 +66,9 @@ class GoalNavigator(HoverPublisher):
         self.position = self.status = self.status_wall = self.alignment = None
         self.follower = RouteFollower(self.settings)
         self.pacer = SimulationPacer()
+        self.trajectory_clock = feed.trajectory_clock
         self.pacer_mark = 0.0
+        self.unclocked_imu_s = 0.0
         self.last_callback = None
         self.last_report = 0.0
         self.last_retry = 0.0
@@ -73,9 +83,12 @@ class GoalNavigator(HoverPublisher):
         self.hold_yaw = None
         self.yaw_rate = 0.0
         self.yaw_desired = None
+        self.velocity_reference_ned = np.zeros(2)
         self.reference = None
         self.world_pose = None
         self.pose_history = deque(maxlen=100)
+        self.pose_check = None
+        self.alignment_counters = None
         self.alignment_settled_since = None
         self.alignment_capture_stamp = None
         self.alignment_capture_scans = 0
@@ -89,6 +102,7 @@ class GoalNavigator(HoverPublisher):
             node_name="isaac_goal_navigator",
             status_filename="ros2_navigation_status.json",
             mode_notice="Takeoff and mode changes require explicit Flight setup buttons; exploration never starts automatically.",
+            publish_period_s=0.05,
         )
         self.create_subscription(
             VehicleStatus,
@@ -157,6 +171,29 @@ class GoalNavigator(HoverPublisher):
         )
 
     def on_position(self, p):
+        if hasattr(self, "diagnostics"):
+            self.diagnostics.emit(
+                "dds_position",
+                fields=finite(
+                    {
+                        k: getattr(p, k, None)
+                        for k in (
+                            "timestamp",
+                            "timestamp_sample",
+                            "x",
+                            "y",
+                            "z",
+                            "vx",
+                            "vy",
+                            "vz",
+                            "xy_valid",
+                            "xy_reset_counter",
+                            "heading_reset_counter",
+                        )
+                    }
+                ),
+                timestamp_domain="XRCE-adjusted; retained raw, not assumed equal to Isaac time",
+            )
         self.position = p
         previous = self.state.last_progress
         super().on_position(p)
@@ -171,18 +208,45 @@ class GoalNavigator(HoverPublisher):
         # Map geometry calculation can finish well after the cloud arrives.
         # Compare with the nearest trusted PX4 sample at cloud receipt, not the
         # current moving pose. Both processes use this host's monotonic clock.
+        self.pose_check = dict(
+            passed=False,
+            reason="missing_history",
+            cloud_stamp_ns=snap.stamp,
+            cloud_receipt_monotonic_s=snap.cloud_wall,
+            map_world_xy=list(snap.pose[:2]),
+            position_limit_m=0.2,
+            heading_limit_deg=15.0,
+            history_gap_limit_s=0.25,
+        )
         if not self.pose_history:
             return False
         wall, ned_xy, heading = min(
             self.pose_history, key=lambda row: abs(row[0] - snap.cloud_wall)
         )
+        self.pose_check.update(
+            sample_receipt_monotonic_s=wall,
+            sample_offset_s=wall - snap.cloud_wall,
+            reason="history_gap",
+        )
         if abs(wall - snap.cloud_wall) > 0.25:
             return False
         xy = self.alignment.world(ned_xy)
         yaw = math.pi / 2 - heading + self.alignment.heading_bias
-        return np.linalg.norm(xy - np.array(snap.pose[:2])) <= 0.2 and abs(
-            math.remainder(snap.pose[2] - yaw, 2 * math.pi)
-        ) <= math.radians(15)
+        position_error = float(np.linalg.norm(xy - np.array(snap.pose[:2])))
+        heading_error = abs(math.remainder(snap.pose[2] - yaw, 2 * math.pi))
+        passed = position_error <= 0.2 and heading_error <= math.radians(15)
+        self.pose_check.update(
+            passed=passed,
+            reason=(
+                "matched"
+                if passed
+                else "position_error" if position_error > 0.2 else "heading_error"
+            ),
+            px4_world_xy=xy.tolist(),
+            position_error_m=position_error,
+            heading_error_deg=math.degrees(heading_error),
+        )
+        return passed
 
     def flight_active(self, now):
         return (
@@ -212,6 +276,7 @@ class GoalNavigator(HoverPublisher):
             return
         p = self.position
         self.alignment = FrameAlignment(snap.pose[:2], snap.pose[2], [p.x, p.y], p.heading)
+        self.alignment_counters = [p.xy_reset_counter, p.heading_reset_counter]
         self.world_pose = self.alignment.world([p.x, p.y])
         self.follower.hold(self.world_pose)
         if self.home_world_xy is None:
@@ -255,15 +320,37 @@ class GoalNavigator(HoverPublisher):
 
     def stop(self, reason, phase="PAUSED", clear_goal=False, auto_recover=False):
         history = getattr(self.dashboard, "history", None)
-        if history and (self.follower.phase, self.follower.reason) != (phase, reason):
+        if hasattr(self, "diagnostics") and (
+            (self.follower.phase, self.follower.reason) != (phase, reason)
+            or phase == "PAUSED"
+            and self.exploration.phase != "PAUSED"
+        ):
+            self.diagnostics.emit(
+                "stop" if phase == "PAUSED" else "controller_transition",
+                reason=reason,
+                phase=phase,
+                clock=self.trajectory_clock.report(time.monotonic()),
+                tracking=getattr(self.follower, "tracking", None),
+                map_health=getattr(self, "map_health", None),
+            )
+        if history and (
+            (self.follower.phase, self.follower.reason) != (phase, reason)
+            or self.exploration.phase != "PAUSED"
+            and phase == "PAUSED"
+        ):
             history.event(
                 "stop_decision",
                 reason,
                 phase=phase,
                 simulation_s=self.pacer.total_s,
                 goal=self.target_goal.tolist() if self.target_goal is not None else None,
+                pose_check=getattr(self, "pose_check", None),
+                map_health=getattr(self, "map_health", None),
+                tracking=getattr(self.follower, "tracking", None),
             )
-        self.auto_recover = bool(auto_recover and self.mission.enabled)
+        self.auto_recover = bool(
+            auto_recover and (self.mission.enabled or self.exploration.enabled)
+        )
         self.recovery_stamp = None
         self.recovery_scans = 0
         self.recovery_started_s = None
@@ -317,13 +404,17 @@ class GoalNavigator(HoverPublisher):
         start = self.world_pose.copy()
         visited = list(self.exploration.visited)
         trail = list(self.exploration.trail)
+        catalog = self.exploration.frontier_ledger.snapshot()
+        active_id = self.exploration.frontier_ledger.active_id
         mission_requested = self.mission.enabled
         self.target_goal = None
         self.follower.hold(start, "Selecting frontier viewpoint", "PLANNING")
 
         def work():
             try:
-                choice = choose_frontier(snap, start, visited, trail)
+                choice = choose_frontier(
+                    snap, start, visited, trail, catalog=catalog, active_id=active_id
+                )
                 self.plan_results.put((token, choice.path, None, choice))
             except ValueError as exc:
                 if mission_requested:
@@ -361,6 +452,8 @@ class GoalNavigator(HoverPublisher):
         current = self.target_goal.copy()
         visited = list(self.exploration.visited)
         trail = list(self.exploration.trail)
+        catalog = self.exploration.frontier_ledger.snapshot()
+        active_id = self.exploration.frontier_ledger.active_id
         self.reconsider_mark = self.pacer.total_s
         self.reconsider_stamp = snap.stamp
         self.exploration.reconsiderations += 1
@@ -370,7 +463,15 @@ class GoalNavigator(HoverPublisher):
                 gain = visible_unknown(
                     snap.model.grid, snap.model.cell(current), snap.model.resolution
                 )
-                choice = choose_frontier(snap, start, visited, trail)
+                choice = choose_frontier(
+                    snap,
+                    start,
+                    visited,
+                    trail,
+                    catalog=catalog,
+                    active_id=active_id,
+                    current_goal=current,
+                )
                 self.reconsider_results.put((token, current, gain, choice, None))
             except ValueError as exc:
                 self.reconsider_results.put((token, current, None, None, str(exc)))
@@ -397,9 +498,7 @@ class GoalNavigator(HoverPublisher):
                 if error:
                     session.reconsider_reason = error
                     continue
-                if snap.model.cell(choice.goal) == snap.model.cell(self.target_goal):
-                    session.reconsider_reason = "Fresh map still selects the same destination"
-                    continue
+                same_goal = snap.model.cell(choice.goal) == snap.model.cell(self.target_goal)
                 # Preserve the moving reference. Validate both physical-to-reference
                 # space and the updated route against the newest footprint map.
                 path = [self.follower.target.tolist()] + choice.path[1:]
@@ -411,6 +510,42 @@ class GoalNavigator(HoverPublisher):
                     session.reconsider_reason = (
                         "New route no longer observed; retaining current route"
                     )
+                    continue
+                session.frontier_ledger.apply_choice(choice)
+                if same_goal:
+                    # A wider observed corridor can move its center while the
+                    # useful destination stays the same. Re-evaluate the route
+                    # itself, rather than waiting for a different frontier.
+                    _, _, cost = routing_geometry(snap)
+                    current = [self.follower.target.tolist()] + [
+                        p.tolist() for p in self.follower.path[self.follower.index :]
+                    ]
+
+                    def route_cost(route):
+                        return sum(
+                            segment_cost(snap.model.cell(a), snap.model.cell(b), cost)
+                            for a, b in zip(route, route[1:])
+                        )
+
+                    if route_cost(path) >= route_cost(current) * 0.95:
+                        session.reconsider_reason = (
+                            "Same destination; current route remains competitive"
+                        )
+                        continue
+                    self.follower.retarget(path)
+                    self.plan_generation += 1
+                    session.reconsider_reason = (
+                        "Route updated toward known-space centers; destination unchanged"
+                    )
+                    history = getattr(self.dashboard, "history", None)
+                    if history:
+                        history.event(
+                            "route_recentered",
+                            session.reconsider_reason,
+                            goal=self.target_goal.tolist(),
+                            path=path,
+                            simulation_s=self.pacer.total_s,
+                        )
                     continue
                 self.target_goal = np.array(choice.goal)
                 self.follower.retarget(path)
@@ -450,7 +585,7 @@ class GoalNavigator(HoverPublisher):
         history = dict(
             visited_viewpoints=list(self.exploration.visited),
             measured_trail=list(self.exploration.trail),
-            selection_policy="Farthest useful unvisited frontier through known safe space",
+            selection_policy="Nearest reachable frontier by planned flight route length",
         )
         folder = (
             Path(__file__).parent
@@ -509,6 +644,7 @@ class GoalNavigator(HoverPublisher):
             and self.stable()
             and self.state.motion_ready(now)
             and self.pacer.fresh(now)
+            and self.trajectory_clock.fresh(now)
             and self.land_pub.get_subscription_count()
             and mission.landing_due(now)
         ):
@@ -525,7 +661,15 @@ class GoalNavigator(HoverPublisher):
             self.say("Completion verified and map saved; requesting PX4 Land at current position")
 
     def recovery_tick(self, now, snap, map_ready):
-        if not (self.auto_recover and self.mission.enabled and self.mission.phase == "PAUSED"):
+        if not (
+            self.auto_recover
+            and (
+                self.mission.enabled
+                and self.mission.phase == "PAUSED"
+                or self.exploration.enabled
+                and self.exploration.phase == "PAUSED"
+            )
+        ):
             return
         if not (
             map_ready
@@ -533,6 +677,7 @@ class GoalNavigator(HoverPublisher):
             and self.stable()
             and self.state.motion_ready(now)
             and self.pacer.fresh(now)
+            and self.trajectory_clock.fresh(now)
         ):
             self.recovery_stamp = None
             self.recovery_scans = 0
@@ -554,13 +699,21 @@ class GoalNavigator(HoverPublisher):
                 return
             self.auto_recover = False
             self.say(
-                "Three fresh aligned scans and stable hover restored; replanning mission route"
+                "Three fresh aligned scans and stable hover restored; replanning exploration route"
             )
 
     def exploration_tick(self, now, snap, map_ready):
         session = self.exploration
         if map_ready:
-            session.observe(snap, self.pacer.total_s)
+            changes = session.observe(snap, self.pacer.total_s)
+            history = getattr(self.dashboard, "history", None)
+            if changes and history:
+                history.event(
+                    "frontier_catalog_updated",
+                    "Fresh map updated frontier boundaries",
+                    **changes,
+                    simulation_s=self.pacer.total_s,
+                )
         if not session.enabled or session.phase == "PAUSED":
             return
         if not map_ready:
@@ -579,6 +732,7 @@ class GoalNavigator(HoverPublisher):
             and self.stable()
             and self.state.motion_ready(now)
             and self.pacer.fresh(now)
+            and self.trajectory_clock.fresh(now)
             and self.plan_results.empty()
             and (self.plan_thread is None or not self.plan_thread.is_alive())
         ):
@@ -629,6 +783,7 @@ class GoalNavigator(HoverPublisher):
                 and self.alignment is not None
                 and self.state.motion_ready(now)
                 and self.pacer.fresh(now)
+                and self.trajectory_clock.fresh(now)
                 and (
                     self.stable()
                     or (
@@ -745,9 +900,18 @@ class GoalNavigator(HoverPublisher):
 
     def publish_target(self):
         now = time.monotonic()
+        self.velocity_reference_ned = np.zeros(2)
         gap = now - self.last_callback if self.last_callback is not None else 0.0
         self.last_callback = now
-        dt = self.pacer.total_s - self.pacer_mark
+        dt = self.trajectory_clock.consume(now)
+        clock_ready = dt is not None
+        dt = dt if clock_ready else 0.0
+        imu_progress = self.pacer.total_s - self.pacer_mark
+        self.unclocked_imu_s = (
+            min(0.25, self.unclocked_imu_s + max(0, imu_progress))
+            if clock_ready and dt == 0
+            else 0.0
+        )
         self.pacer_mark = self.pacer.total_s
         status_fresh = self.status_fresh(now) and not self.status.failsafe
         landing = self.mission.observe_landing(
@@ -799,6 +963,27 @@ class GoalNavigator(HoverPublisher):
         p = self.position
         snap, failure = self.feed.get()
         map_ready = snap is not None and not failure and snap.fresh(now)
+        self.map_health = snap.health(now) if snap is not None else None
+        transient_map_gap = (
+            not map_ready
+            and failure is None
+            and snap is not None
+            and (
+                snap.valid
+                or snap.reason
+                in (
+                    "Cloud missing or stale",
+                    "Simulation clock missing or stopped",
+                    "Confirming live scans",
+                )
+            )
+        )
+        if not map_ready and failure is None and self.map_health:
+            h = self.map_health
+            failure = (
+                f"Map inputs unavailable: {snap.reason}; publication/cloud/clock ages "
+                f"{h['publication_age_s']:.2f}/{h['cloud_age_s']:.2f}/{h['clock_age_s']:.2f} s"
+            )
         if self.hold_yaw is None:
             self.hold_yaw = p.heading
         self.capture_alignment(snap, map_ready)
@@ -806,7 +991,16 @@ class GoalNavigator(HoverPublisher):
             self.world_pose = self.alignment.world([p.x, p.y])
             if map_ready and not self.map_pose_matches(snap):
                 map_ready = False
-                failure = "Capture-time world/PX4 pose disagreement or missing history; holding"
+                check = self.pose_check
+                if check["reason"] == "position_error":
+                    detail = f"position error {check['position_error_m']:.3f} m > 0.200 m"
+                elif check["reason"] == "heading_error":
+                    detail = f"heading error {check['heading_error_deg']:.1f} deg > 15.0 deg"
+                elif check["reason"] == "history_gap":
+                    detail = f"pose sample gap {abs(check['sample_offset_s']):.3f} s > 0.250 s"
+                else:
+                    detail = "missing PX4 pose history"
+                failure = f"Capture-time world/PX4 check: {detail}; holding"
         if self.reference is None:
             self.reference = np.array(self.state.anchor[:2])
         active = self.follower.phase in ("NAVIGATING", "SETTLING", "PLANNING", "BLOCKED")
@@ -825,15 +1019,19 @@ class GoalNavigator(HoverPublisher):
                     self.follower.hold(
                         self.world_pose, "Native PX4 mode; ready for Offboard", "HOLD"
                     )
-        elif active and (not map_ready or gap > 0.5 or gap < 0):
+        elif active and (not map_ready or not clock_ready or gap > 0.5 or gap < 0):
             self.stop(
                 failure
                 or (
-                    "Map data unavailable; hold until Resume"
-                    if not map_ready
-                    else "Control callback delayed"
+                    "Simulation clock unavailable or discontinuous; hold until Resume"
+                    if not clock_ready
+                    else (
+                        "Map data unavailable; hold until Resume"
+                        if not map_ready
+                        else "Control callback delayed"
+                    )
                 ),
-                auto_recover=not map_ready and failure is None and 0 <= gap <= 0.5,
+                auto_recover=transient_map_gap and 0 <= gap <= 0.5,
             )
         elif active and (
             abs(p.z + 1.0) > 0.25
@@ -907,6 +1105,7 @@ class GoalNavigator(HoverPublisher):
                         for a, b in zip(path, path[1:])
                     ):
                         if choice is not None:
+                            self.exploration.frontier_ledger.apply_choice(choice)
                             self.target_goal = np.array(choice.goal)
                             self.exploration.phase = "TRAVELLING"
                             self.exploration.expected_gain_m2 = choice.expected_new_area_m2
@@ -947,9 +1146,56 @@ class GoalNavigator(HoverPublisher):
                     segment_safe(snap.body_free, snap.model.cell(a), snap.model.cell(b))
                     for a, b in zip(route, route[1:])
                 )
-                self.follower.tick(
-                    dt, self.world_pose, snap.hits, observed_corridor=observed_corridor
+                previous_target = (
+                    self.follower.target.copy() if self.follower.target is not None else None
                 )
+                route_direction = self.follower.heading_direction()
+                heading_error = (
+                    math.remainder(p.heading - self.alignment.yaw_ned(route_direction), 2 * math.pi)
+                    if route_direction is not None and np.linalg.norm(route_direction) > 1e-8
+                    else None
+                )
+                self.follower.tick(
+                    dt,
+                    self.world_pose,
+                    snap.hits,
+                    observed_corridor=observed_corridor,
+                    heading_error=heading_error,
+                    measured_speed=math.hypot(p.vx, p.vy),
+                    # DDS telemetry may precede the corresponding Zenoh clock
+                    # packet. Delivered IMU periods give a bounded prediction
+                    # interval, but never advance trajectory position twice.
+                    tracking_dt=max(dt, self.unclocked_imu_s),
+                    motion_safe=lambda a, b: segment_safe(
+                        snap.body_free, snap.model.cell(a), snap.model.cell(b)
+                    ),
+                )
+                if self.follower.phase == "PAUSED":
+                    self.stop(self.follower.reason, "PAUSED")
+                if (
+                    previous_target is not None
+                    and self.follower.phase == "NAVIGATING"
+                    and 0 < dt <= 0.5
+                    and 0 <= gap <= 0.5
+                ):
+                    # Feed forward only the validated reference's actual advance,
+                    # including headroom, braking and bend limits. A held/reset
+                    # target never creates a velocity from a position jump.
+                    world_velocity = (self.follower.target - previous_target) / dt
+                    self.velocity_reference_ned = self.alignment.ned_velocity(world_velocity)
+                elif (
+                    self.follower.phase == "NAVIGATING"
+                    and clock_ready
+                    and dt == 0
+                    and imu_progress > 0
+                ):
+                    # Sparse clock publications are not stop commands. Keep the
+                    # last validated velocity between samples only while IMU
+                    # integration is still progressing. Paused/stale inputs
+                    # retain zero feedforward.
+                    self.velocity_reference_ned = self.alignment.ned_velocity(
+                        self.follower.velocity
+                    )
             if self.follower.phase == "SETTLING":
                 settled = (
                     np.linalg.norm(self.world_pose - self.target_goal) <= 0.15 and self.stable()
@@ -979,8 +1225,44 @@ class GoalNavigator(HoverPublisher):
             self.reference = self.alignment.ned(self.follower.target)
         self.update_yaw(dt, now, map_ready, gap)
         mode, target = hover_messages(PX4_RECEIPT_TIMESTAMP, *self.reference, 1.0, self.hold_yaw)
+        # Position stays the primary Offboard control mode. PX4 adds finite XY
+        # velocity as feedforward; vertical control remains position-only.
+        target.velocity = [*map(float, self.velocity_reference_ned), math.nan]
         self.mode_pub.publish(mode)
         self.target_pub.publish(target)
+        if hasattr(self, "diagnostics"):
+            self.diagnostics.emit(
+                "reference",
+                sim_ns=self.trajectory_clock.stamp,
+                world_xy=(
+                    self.follower.target.tolist()
+                    if self.alignment is not None and self.follower.target is not None
+                    else None
+                ),
+                ned_xy=self.reference.tolist(),
+                velocity_ned_xy=self.velocity_reference_ned.tolist(),
+                alignment=(
+                    dict(
+                        rotation=self.alignment.rotation.tolist(),
+                        offset=self.alignment.offset.tolist(),
+                        reset_counters=self.alignment_counters,
+                    )
+                    if self.alignment is not None
+                    else None
+                ),
+                phase=self.follower.phase,
+                armed_offboard=self.flight_active(now),
+                trajectory_dt_s=dt,
+                imu_progress_s=imu_progress,
+                clock=self.trajectory_clock.report(now),
+            )
+            self.diagnostics.emit(
+                "cycle",
+                callback_gap_s=gap,
+                callback_duration_s=time.monotonic() - now,
+                clock_ready=clock_ready,
+                clock=self.trajectory_clock.report(now),
+            )
         if self.mode_pub.get_subscription_count() and self.target_pub.get_subscription_count():
             self.ready_samples += 1
             if self.ready_samples == 50:
@@ -999,14 +1281,15 @@ class GoalNavigator(HoverPublisher):
             and self.flight_active(now)
             and self.state.motion_ready(now)
             and self.pacer.fresh(now)
+            and self.trajectory_clock.fresh(now)
             and 0 <= callback_gap <= 0.5
             and self.alignment is not None
             and self.follower.phase == "NAVIGATING"
             and self.follower.target is not None
             and self.follower.index < len(self.follower.path)
         ):
-            direction = self.follower.path[self.follower.index] - self.follower.target
-            if np.linalg.norm(direction) > 0.03:
+            direction = self.follower.heading_direction()
+            if direction is not None and np.linalg.norm(direction) > 0.03:
                 desired = self.alignment.yaw_ned(direction)
         self.yaw_desired = desired
         self.hold_yaw, self.yaw_rate = smooth_yaw(
@@ -1037,7 +1320,7 @@ class GoalNavigator(HoverPublisher):
             "armed Offboard mode": self.flight_active(now),
             "stable hover": self.stable(),
             "fresh position": self.state.motion_ready(now),
-            "fresh simulation timing": self.pacer.fresh(now),
+            "fresh simulation timing": self.pacer.fresh(now) and self.trajectory_clock.fresh(now),
         }
         report = dict(
             recorded_utc=datetime.now(timezone.utc).isoformat(),
@@ -1056,6 +1339,7 @@ class GoalNavigator(HoverPublisher):
             visited_viewpoints=self.exploration.visited,
             goal=self.target_goal.tolist() if self.target_goal is not None else None,
             route_planner="optimizedRoutePlanner",
+            planning_policy="prefer_known_space_centers_and_clearance",
             home_xy=self.home_world_xy.tolist() if self.home_world_xy is not None else None,
             returning_home=self.returning_home,
             remaining_m=(
@@ -1065,6 +1349,11 @@ class GoalNavigator(HoverPublisher):
             ),
             clearance_m=ahead,
             speed_m_s=self.follower.speed,
+            velocity_reference_ned_xy=self.velocity_reference_ned.tolist(),
+            target_stream_hz=20,
+            control_profile="position_with_route_velocity_feedforward",
+            motion_policy="rounded_routes_curvature_braking_tracking_governor",
+            runtime=RUNTIME.report(),
             yaw_mode="face_route_smoothly",
             yaw_reference_ned_rad=self.hold_yaw,
             yaw_desired_ned_rad=self.yaw_desired,
@@ -1077,12 +1366,17 @@ class GoalNavigator(HoverPublisher):
             clock_rebases=self.state.clock_rebases,
             reference_ned_xy=self.reference.tolist() if self.reference is not None else None,
             measured_world_xy=self.world_pose.tolist() if self.world_pose is not None else None,
+            pose_check=getattr(self, "pose_check", None),
+            map_health=getattr(self, "map_health", None),
             measured_speed_m_s=(
                 math.hypot(p.vx, p.vy)
                 if p is not None and p.v_xy_valid and all(math.isfinite(v) for v in (p.vx, p.vy))
                 else None
             ),
             delivered_simulation_s=self.pacer.total_s,
+            trajectory_simulation_s=self.trajectory_clock.total_s,
+            trajectory_clock=self.trajectory_clock.report(now),
+            tracking=self.follower.tracking,
             settings=asdict(self.settings),
             mission=self.mission.report(),
             automatic_map_recovery=self.auto_recover,
@@ -1095,7 +1389,8 @@ class GoalNavigator(HoverPublisher):
                 expected_new_area_m2=self.exploration.expected_gain_m2,
                 frontier_cells=self.exploration.frontier_count,
                 selection_reason=self.exploration.selection_reason,
-                policy="confirmed_wall_endings_then_farthest_frontier",
+                policy="persistent_frontiers_nearest_planned_flight_route",
+                frontier_catalog=self.exploration.frontier_ledger.report(),
                 corner_xy=self.exploration.corner_xy,
                 hidden_area_m2=self.exploration.hidden_area_m2,
                 wall_endings_xy=self.exploration.wall_endings_xy,
@@ -1132,7 +1427,12 @@ class GoalNavigator(HoverPublisher):
         status = self.status
         p = self.position
         status_fresh = self.status_fresh(now)
-        telemetry = self.state.motion_ready(now) and self.pacer.fresh(now)
+        telemetry = (
+            self.state.motion_ready(now)
+            and self.pacer.fresh(now)
+            and self.trajectory_clock.fresh(now)
+            and self.trajectory_clock.fresh(now)
+        )
         armed = status_fresh and status.arming_state == VehicleStatus.ARMING_STATE_ARMED
         disarmed = status_fresh and status.arming_state == VehicleStatus.ARMING_STATE_DISARMED
         landed_fresh = (
@@ -1210,10 +1510,22 @@ class GoalNavigator(HoverPublisher):
         }
         return dict(
             updated_monotonic_s=now,
+            checks=dict(
+                telemetry_fresh=bool(status_fresh and telemetry),
+                preflight_ok=bool(takeoff["PX4 preflight checks"]),
+                landed=bool(self.landed) if landed_fresh else None,
+                stationary=bool(low_speed) if status_fresh and telemetry else None,
+                ground_origin=bool(takeoff["stationary near the local ground origin"]),
+                hover_stable=bool(self.stable()) if status_fresh and telemetry else None,
+                map_aligned=bool(map_ready and self.alignment is not None),
+                command_connected=bool(command_link),
+                target_stream_ready=bool(self.ready_samples >= 50),
+                origin_fault=bool(self.state.fault),
+            ),
             armed=bool(armed),
             mode=modes.get(status.nav_state, "Other") if status_fresh else "Unavailable",
             can_takeoff=all(takeoff.values()),
-            can_takeoff_reason=reason(takeoff),
+            can_takeoff_reason=next_step if self.state.fault else reason(takeoff),
             can_enable_navigation=all(offboard.values()),
             can_enable_navigation_reason=reason(offboard),
             can_land=bool(armed and command_link),
@@ -1264,6 +1576,7 @@ def main():
     )
     dashboard = None
     node = None
+    reload_requested = False
     try:
         commands = None if args.observe else Queue(maxsize=8)
         history = RunHistory(
@@ -1272,6 +1585,9 @@ def main():
             / ("decisions_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f") + ".jsonl")
         )
         dashboard = Dashboard(feed, commands, args.port, history=history)
+        reload_context = (
+            restore_reload(Path(__file__).parent, dashboard) if not args.observe else None
+        )
         dashboard.report["settings"] = asdict(settings)
         print("Navigator:", dashboard.url, flush=True)
         rclpy.init()
@@ -1300,6 +1616,16 @@ def main():
                 and not (dashboard.reset and dashboard.reset.report()["busy"]),
             )
             reset = dashboard.reset = ExperimentReset(backend=flight_backend)
+            if reload_context:
+                reset.state.update(reload_context["reset"])
+                request_id = reload_context.get("request_id")
+                if request_id:
+                    dashboard.receipts.begin(dict(action="restart", request_id=request_id))
+                    dashboard.acknowledge_command(
+                        request_id,
+                        "completed",
+                        "Reset complete; updated navigator loaded, drone disarmed",
+                    )
             handled_reset = True
             while rclpy.ok():
                 if reset.quiesce.is_set() and not reset.released.is_set():
@@ -1332,26 +1658,14 @@ def main():
                     handled_reset = False
                 if reset.done.is_set() and not handled_reset:
                     if reset.success:
-                        dashboard.history = RunHistory(
-                            Path(__file__).parent
-                            / "logs"
-                            / (
-                                "decisions_"
-                                + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-                                + ".jsonl"
-                            )
+                        prepare_reload(
+                            Path(__file__).parent,
+                            reset.report(),
+                            dashboard.previous_history,
+                            dashboard.reset_request_id,
                         )
-                        feed = MapFeed(
-                            floor_z,
-                            settings.near_range_m,
-                            settings.obstacle_margin_m,
-                            settings.body_radius_m,
-                            settings=settings,
-                        )
-                        dashboard.feed = feed
-                        node = GoalNavigator(feed, dashboard, commands, settings)
-                        dashboard.flight_available = True
-                        dashboard.note = "Reset complete. Drone is on the ground and disarmed."
+                        reload_requested = True
+                        break
                     elif node is None:
                         dashboard.report = dict(
                             phase="RESET_FAILED", reason=reset.report()["reason"], ready=False
@@ -1371,7 +1685,8 @@ def main():
         if dashboard is not None:
             dashboard.close()
         feed.close()
+    return RELOAD_EXIT_CODE if reload_requested else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -5,6 +5,7 @@ import math
 import numpy as np
 from .mapping import FREE, UNKNOWN, OCCUPIED
 from .planning import plan, route_distances
+from .frontier_ledger import FrontierLedger, boundary_geometry, MINIMUM_SPAN_M
 
 
 def frontiers(grid):
@@ -114,6 +115,8 @@ class ExplorationChoice:
     corner_xy: list | None = None
     hidden_area_m2: float = 0.0
     wall_endings_xy: list | None = None
+    frontier_id: int | None = None
+    frontier_assessments: list | None = None
 
 
 def wall_occluded_cells(grid, start, cells):
@@ -138,107 +141,183 @@ def wall_occluded_cells(grid, start, cells):
     return result
 
 
-def choose_frontier(snapshot, start_xy, visited=(), trail=()):
+def choose_frontier(
+    snapshot, start_xy, visited=(), trail=(), *, catalog=None, active_id=None, current_goal=None
+):
+    """Nearest reachable frontier by actual center-guided route length.
+
+    Cluster IDs come from the session ledger. Visiting a viewpoint does not
+    resolve a boundary. Keep a useful active frontier before choosing the next.
+    """
     model = snapshot.model
     edges = frontiers(model.grid)
     if not edges.any():
         raise ValueError("No observed free/unknown frontier remains")
-    # Stand off so the complete vehicle footprint remains in observed space.
-    near = np.zeros(edges.shape, dtype=bool)
-    radius = int(math.ceil(0.9 / model.resolution))
-    h, w = edges.shape
-    for dy in range(-radius, radius + 1):
-        for dx in range(-radius, radius + 1):
-            if math.hypot(dy, dx) * model.resolution > 0.9:
-                continue
-            ya, yb = max(0, dy), min(h, h + dy)
-            xa, xb = max(0, dx), min(w, w + dx)
-            near[ya:yb, xa:xb] |= edges[ya - dy : yb - dy, xa - dx : xb - dx]
+    if catalog is None:
+        ledger = FrontierLedger()
+        ledger.update(snapshot, edges)
+        catalog = ledger.snapshot()
     distances = route_distances(snapshot, start_xy)
-    tips = wall_endings(model.grid, model.resolution, model.confirmed_walls)
-    candidates = np.argwhere(np.isfinite(distances) & near)
-    candidates = candidates[(candidates[:, 0] % 3 == 0) & (candidates[:, 1] % 3 == 0)]
-    ranked = []
-    history = np.asarray(trail if len(trail) else visited, dtype=float).reshape(-1, 2)
-    for cell in candidates:
-        goal = model.world(cell)
-        distance = math.dist(goal, start_xy)
-        if distance < 0.65 or any(math.dist(goal, old) < 0.5 for old in visited):
-            continue
-        separation = float(np.linalg.norm(history - goal, axis=1).min()) if len(history) else None
-        novel = separation is None or separation >= 0.75
-        near_tip = min(
-            (np.linalg.norm(cell - tip[0]) * model.resolution for tip in tips), default=math.inf
-        )
-        ranked.append((novel, float(distances[tuple(cell)]), cell, goal, separation, near_tip))
-    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    # Bound selection work outside the heartbeat. Route checks determine
-    # reachability. Farthest means travel through green space, not across a wall.
-    # Reserve work for both corner opportunities and ordinary frontiers. A
-    # distant frontier must not crowd a nearby hidden branch out of the pool.
-    corner_pool = sorted(
-        (row for row in ranked if row[5] <= 3.0), key=lambda row: (row[0], -row[5]), reverse=True
-    )[:24]
-    pool = {tuple(row[2]): row for row in ranked[:24] + corner_pool}
-    estimates = [
-        (row, visible_unknown_cells(model.grid, row[2], model.resolution)) for row in pool.values()
+    radius = int(math.ceil(0.9 / model.resolution))
+    offsets = [
+        (dy, dx, dy * dy + dx * dx)
+        for dy in range(-radius, radius + 1)
+        for dx in range(-radius, radius + 1)
+        if math.hypot(dy, dx) * model.resolution <= 0.9
     ]
-    occluded = (
-        wall_occluded_cells(
-            model.grid,
-            np.array(model.cell(start_xy)),
-            set().union(*(seen for _, seen in estimates)),
-        )
-        if tips
-        else set()
-    )
-    scored = []
-    for row, seen in estimates:
-        novel, distance, cell, goal, separation, near_tip = row
-        gain = len(seen) * model.resolution**2
-        corner, hidden = None, 0.0
-        if near_tip <= 3.0:
-            hidden_cells = np.array(sorted(seen & occluded), dtype=int).reshape(-1, 2)
-            for tip, direction, _ in tips:
-                if np.linalg.norm(cell - tip) * model.resolution > 3.0:
-                    continue
-                delta = (hidden_cells - tip) * model.resolution
-                area = np.count_nonzero(np.linalg.norm(delta, axis=1) <= 3.0) * model.resolution**2
-                if area >= 0.12 and area > hidden:
-                    corner, hidden = model.world(tip).tolist(), area
-        if gain >= 0.12:
-            scored.append((novel, distance, gain, goal, separation, corner, hidden))
-    # Unvisited views remain first. Among them, reveal a supported hidden branch
-    # before travelling to a farther plain frontier. Without a corner clue the
-    # existing farthest-frontier preference remains unchanged.
-    scored.sort(
-        key=lambda item: (item[0], item[5] is not None, item[6], item[1], item[2]), reverse=True
-    )
-    for novel, distance, gain, goal, separation, corner, hidden in scored:
-        try:
-            path = plan(snapshot, start_xy, goal)
-        except ValueError:
+    owners = {}
+    for region in catalog:
+        if boundary_geometry(region["cells"], model.resolution)[0] < MINIMUM_SPAN_M:
             continue
-        length = sum(math.dist(a, b) for a, b in zip(path, path[1:]))
-        return ExplorationChoice(
-            goal.tolist(),
-            path,
-            gain,
-            length,
-            int(edges.sum()),
-            separation,
-            (
-                f"Look around confirmed wall ending: estimated hidden gain {hidden:.2f} m²; "
-                f"{distance:.1f} m through known space"
-                if corner is not None
-                else f"Farthest {'unvisited' if novel else 'remaining'} useful frontier: "
-                f"{distance:.1f} m through known space; estimated gain {gain:.2f} m²"
+        for y, x in region["cells"]:
+            for dy, dx, squared in offsets:
+                cell = (y + dy, x + dx)
+                if (
+                    cell[0] % 3
+                    or cell[1] % 3
+                    or not model.inside(cell)
+                    or not snapshot.safe[cell]
+                    or not math.isfinite(distances[cell])
+                ):
+                    continue
+                value = (squared, region["id"])
+                if value < owners.get(cell, (math.inf, math.inf)):
+                    owners[cell] = value
+    candidates = {row["id"]: [] for row in catalog}
+    history = np.asarray(trail if len(trail) else visited, dtype=float).reshape(-1, 2)
+    for cell, (_, key) in owners.items():
+        goal = model.world(cell)
+        if math.dist(goal, start_xy) < 0.65 or any(math.dist(goal, old) < 0.5 for old in visited):
+            continue
+        candidates[key].append((float(distances[cell]), cell, goal))
+    assessments = []
+    options = []
+    for region in catalog:
+        key = region["id"]
+        span, midpoint, axis = boundary_geometry(region["cells"], model.resolution)
+        if span < MINIMUM_SPAN_M:
+            assessments.append(
+                dict(
+                    id=key,
+                    status="filtered",
+                    span_m=span,
+                    route_length_m=None,
+                    viewpoint_xy=None,
+                    reason=f"Boundary span {span:.2f} m below {MINIMUM_SPAN_M:.1f} m; unresolved",
+                )
+            )
+            continue
+        # Aim near the middle of this boundary, not whichever endpoint is
+        # nearest the drone. Frontier selection still compares flight lengths.
+        ranked = sorted(
+            candidates[key],
+            key=lambda r: (
+                abs(float((np.asarray(r[1]) - midpoint) @ axis)),
+                -snapshot.clearance[r[1]],
+                r[0],
             ),
-            corner,
-            hidden,
-            [model.world(tip).tolist() for tip, _, _ in tips],
         )
-    raise ValueError("No useful reachable frontier viewpoint; unknown space may remain")
+        trials = []
+        # Retain a useful destination within the active boundary instead of
+        # repeatedly moving its goal closer as the drone approaches it.
+        if key == active_id and current_goal is not None:
+            cell = model.cell(current_goal)
+            if (
+                model.inside(cell)
+                and snapshot.safe[cell]
+                and any(math.dist(cell, edge) * model.resolution <= 1.2 for edge in region["cells"])
+                and not any(math.dist(current_goal, old) < 0.5 for old in visited)
+            ):
+                trials.append((np.array(current_goal), True))
+        trials.extend((goal, False) for _, _, goal in ranked[:12])
+        best = None
+        useful = 0
+        for goal, retained in trials:
+            cell = model.cell(goal)
+            gain = visible_unknown(model.grid, cell, model.resolution)
+            if gain < 0.12:
+                continue
+            useful += 1
+            try:
+                path = plan(snapshot, start_xy, goal)
+            except ValueError:
+                continue
+            length = sum(math.dist(a, b) for a, b in zip(path, path[1:]))
+            separation = (
+                float(np.linalg.norm(history - goal, axis=1).min()) if len(history) else None
+            )
+            row = dict(
+                id=key, goal=goal, path=path, length=length, gain=gain, separation=separation
+            )
+            if retained:
+                best = row
+                break
+            center_error = abs(float((np.asarray(cell) - midpoint) @ axis)) * model.resolution
+            row["center_error"] = center_error
+            if best is None or (center_error, length) < (best["center_error"], best["length"]):
+                best = row
+            if useful >= 3:
+                break
+        if best is None:
+            assessments.append(
+                dict(
+                    id=key,
+                    status="deferred" if ranked else "unreachable",
+                    route_length_m=None,
+                    viewpoint_xy=None,
+                    reason="No useful unvisited reachable viewpoint; boundary remains unresolved",
+                )
+            )
+        else:
+            options.append(best)
+            assessments.append(
+                dict(
+                    id=key,
+                    status="pending",
+                    route_length_m=best["length"],
+                    viewpoint_xy=best["goal"].tolist(),
+                    reason="Reachable route through observed free space",
+                )
+            )
+    if not options:
+        raise ValueError(
+            f"No useful reachable frontier with span at least {MINIMUM_SPAN_M:.1f} m; unknown space may remain"
+        )
+    selected = min(options, key=lambda r: (r["id"] != active_id, r["length"], -r["gain"], r["id"]))
+    tips = wall_endings(model.grid, model.resolution, model.confirmed_walls)
+    corner = None
+    hidden = 0.0
+    seen = visible_unknown_cells(model.grid, model.cell(selected["goal"]), model.resolution)
+    if tips:
+        occluded = wall_occluded_cells(model.grid, np.array(model.cell(start_xy)), seen)
+        for tip, _, _ in tips:
+            if np.linalg.norm(np.array(model.cell(selected["goal"])) - tip) * model.resolution > 3:
+                continue
+            area = (
+                sum(
+                    np.linalg.norm(np.array(cell) - tip) * model.resolution <= 3
+                    for cell in occluded
+                )
+                * model.resolution**2
+            )
+            if area >= 0.12 and area > hidden:
+                corner, hidden = model.world(tip).tolist(), float(area)
+    retained = selected["id"] == active_id
+    return ExplorationChoice(
+        selected["goal"].tolist(),
+        selected["path"],
+        selected["gain"],
+        selected["length"],
+        int(edges.sum()),
+        selected["separation"],
+        f"{'Continue active' if retained else 'Nearest reachable'} frontier F{selected['id']}: "
+        f"{selected['length']:.1f} m planned flight route; estimated gain {selected['gain']:.2f} m²",
+        corner,
+        hidden,
+        [model.world(tip).tolist() for tip, _, _ in tips],
+        selected["id"],
+        assessments,
+    )
 
 
 class ExplorationSession:
@@ -272,13 +351,17 @@ class ExplorationSession:
         self.corner_xy = None
         self.hidden_area_m2 = 0.0
         self.wall_endings_xy = []
+        self.frontier_ledger = FrontierLedger()
 
     def start(self, snapshot, *, continuous=False, simulation_s=0.0):
+        # Re-starting Explore in the same map retains unresolved work and IDs.
+        self.frontier_ledger.update(snapshot, frontiers(snapshot.model.grid))
         self.enabled = True
         self.phase = "SELECTING"
         self.reason = "Choosing a reachable frontier viewpoint"
-        self.visited = []
-        self.trail = [list(snapshot.pose[:2])]
+        # Viewpoint memory belongs to this experiment, including Explore after Hold.
+        if not self.trail:
+            self.trail = [list(snapshot.pose[:2])]
         self.reached = 0
         self.stalls = 0
         self.area_gain_m2 = 0.0
@@ -301,11 +384,13 @@ class ExplorationSession:
         )
 
     def observe(self, snapshot, simulation_s):
+        changes = self.frontier_ledger.update(snapshot, frontiers(snapshot.model.grid))
         if self.enabled:
             cells = int(((snapshot.model.grid == FREE) | (snapshot.model.grid == OCCUPIED)).sum())
             self.area_gain_m2 = (cells - self.baseline) * snapshot.model.resolution**2
             if self.started_s is not None:
                 self.elapsed_s = max(0.0, simulation_s - self.started_s)
+        return changes
 
     def pause(self, reason):
         if self.enabled:

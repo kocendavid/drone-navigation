@@ -8,7 +8,13 @@ from pathlib import Path
 def load_bridge_modules(project):
     project = Path(project).resolve()
     package_dir = project / "px4_isaac"
-    names = ("px4_isaac", "px4_isaac.model", "px4_isaac.transport", "px4_isaac.bridge")
+    names = (
+        "px4_isaac",
+        "px4_isaac.model",
+        "px4_isaac.mass",
+        "px4_isaac.transport",
+        "px4_isaac.bridge",
+    )
     previous = {name: sys.modules[name] for name in names if name in sys.modules}
     for name in names:
         sys.modules.pop(name, None)

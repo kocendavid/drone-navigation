@@ -7,9 +7,13 @@ scene editing and explicit takeoff/flight-mode selection through the dashboard
 or PX4 console. The explicit explore-and-land
 mission can request landing after confirming completion and saving its map.
 
-Updated **2026-10-16**. The current maze configuration covers 64 × 24 m at
+Updated **2026-10-19**. The current maze configuration covers 64 × 53 m at
 0.2 m resolution, with floor Z near −3.98 m. Scene preparation and disarmed
-Isaac/PX4 readiness are verified; live autonomous maze exploration remains pending.
+Isaac/PX4 readiness have been verified in individual ground checks. Recorded
+exploration runs are available. Clock/geometry separation is loaded and has a
+ground transport check; the latest near-hover turn policy passes offline tests
+and still needs moving-flight evaluation. Vertical estimation disagreement and
+landing detection remain open issues. The current full Python suite passes 291 tests.
 See [current maze setup](docs/MAZE_SETUP.txt) for the detailed procedure.
 
 ## Contents
@@ -37,9 +41,39 @@ line fit supports horizontal, vertical and diagonal segments; isolated hits and
 the middle of a straight wall do not qualify. These are **occlusion clues**, not
 semantic room recognition or proof that a passage exists.
 
-Among unvisited reachable viewpoints, the selector favors a view that could
-reveal unknown area currently hidden behind a wall near such an ending. If no
-useful corner view qualifies, it keeps the farthest useful frontier preference.
+The current selector keeps a persistent list of connected free/unknown frontier
+boundaries, with stable IDs while they overlap or move by a neighboring cell.
+The **Frontier work list** shows pending, active, unreachable/deferred and resolved
+work, along with estimated route lengths. New scans can split or merge boundary
+identities; merged work continues under the surviving ID and is not marked explored.
+
+When selecting new work, it prefers the shortest evaluated **planned flight
+route** through known safe space, including the center/clearance preference.
+It does not compare straight-line screen distance, nor the weighted A* cost as
+if that cost were metres. A shortest-grid-distance search generates nearby safe
+viewpoint candidates; up to three useful candidates per frontier are fully
+planned and their resulting polyline lengths are compared. This is nearest
+among evaluated viewpoints, not a proof of the globally shortest continuous tour.
+An active frontier and its useful goal are retained during travel, even if a
+different frontier would now be closer. Routes to that goal may still recenter.
+
+Reaching a viewpoint records a visit, not completion of a frontier. Its boundary
+must disappear from three distinct accepted map scans before it becomes resolved.
+Repeated/stale/invalid scans cannot add confirmation. Hold and a new Explore in
+the same experiment retain the ledger and visited viewpoints; Reset clears them.
+The ledger is included in map/decision frames and the UI records lifecycle updates.
+The map draws each frontier boundary and labels its measured span. Only boundaries
+with principal-axis span at least **1.5 m** get exploration targets; viewpoints
+favor the middle of that boundary over its nearest endpoint. This span is not
+a measurement of doorway clearance. Smaller boundaries remain **filtered,
+unresolved**, can become eligible as observations expand, and still prevent
+claiming complete exploration or automatically landing. Amber squares remain
+wall-ending clues, independent of the frontier boundary display.
+The existing viewpoint/stall limits can still stop a run with unresolved work;
+that is not a declaration that all rooms were explored.
+
+Wall-ending clues remain available to explain occlusions, but no longer override
+the nearest-route ordering requested for systematic exploration.
 Every destination and route still passes the observed-space and obstacle-margin
 checks. No geometry is inserted into the map by this estimate. A doorway can be
 known clear while the room beside the far face of its wall remains unseen.
@@ -51,7 +85,8 @@ the selected clue, estimated hidden area and selection reason. Estimates use
 sparse rays over a 3 m neighborhood, not a prediction of the full room's area.
 As actual LiDAR fills a room, that area ceases to count as unknown. Existing
 travel/viewpoint history discourages revisiting the same observation positions.
-Continuous reconsideration still has no switching-radius rule.
+Continuous reconsideration has no switching-radius rule; frontier identity and
+fresh observation evidence determine whether to keep or retire current work.
 
 This is a first geometric heuristic: short/thick walls, noisy geometry or
 unconfirmed endings can be missed, and two-room behavior needs a live run.
@@ -59,6 +94,39 @@ It does not classify rooms or guarantee complete coverage. The independent
 enclosure/completion checks remain responsible for declaring exploration done.
 
 ## optimizedRoutePlanner: return home
+
+### Known-space centers and return preview
+
+Routes now favor **clearance over the shortest geometric distance**. A distance
+field measures room to both mapped walls and the boundary of observed space.
+Its ridges appear as the optional pale center overlay. This is the center of
+currently known space, which changes as new observations arrive; it does not
+estimate a room centroid or assert that unknown space contains a wall.
+
+A* adds penalties near those boundaries and away from the detected center ridges:
+`1 + weight * (scale / (clearance + scale))² + weight * (distance_to_center / (clearance + scale))²`,
+with weight 8 and scale 2 m. The earlier clearance-only cost did not use the
+displayed centerlines directly. The center term now guides both A* and shortcut
+selection. This can select a longer, wider corridor. It is a preference, not a rule that
+every point must lie on a center ridge: endpoints, narrow passages and the
+existing near-wall start escape still need to connect. Shortcutting preserves
+the combined center/clearance objective within a 2% cost tolerance and retains all hard
+observed-space/footprint checks. Exploration, manual routes, previews and
+Return to start share this planner. Frontier ranking still uses geometric
+reachability distance, so its reported metres are not weighted route cost.
+During exploration, each fresh-map reconsideration can also update the route
+to the same destination when its combined center/clearance cost improves by
+at least 5%. This is recorded as `route_recentered`, without counting a new
+destination. It avoids retaining an edge-following route solely because its
+frontier is still useful as more of the corridor becomes known.
+
+The **Return to start** card is at the top of the controls. **Preview return
+route** is read-only: it draws a gold dashed route to H and displays its length,
+without starting flight. **Return to start** commands the real return and
+replans against the then-current map. Start capture requires the first stable
+mapped hover; before that, the visible card explains why its buttons are
+unavailable. A reset clears home and any pending or displayed return preview.
+Known center masks are included in new map-history frames; old frames have none.
 
 **Return home** saves and returns to the first stable, aligned 1 m hover point
 in the current experiment. The map marks that point **H**. It is captured once;
@@ -79,14 +147,41 @@ separately if you want to land.
 
 Because the return planner uses the accumulated map rather than replaying the
 outbound travel history, it can skip exploration detours and use known
-shortcuts between connected rooms. A* minimizes grid distance; shortcutting
-reduces unnecessary bends. This is not a guarantee of the mathematically
+shortcuts between connected rooms. A* minimizes distance weighted by clearance;
+shortcutting reduces unnecessary bends while preserving that preference. This is not a guarantee of the mathematically
 shortest continuous route or fastest flight: clearance, turns, acceleration and
 new obstacles still affect the result. Unknown space remains excluded even if
 it would make a shorter path. Home capture, its selected goal, route changes,
 interruptions and arrival are included in decision history/map frames.
 
 ## Control the lab through code
+
+### Ground readiness and repeatable vehicle physics
+
+The bridge uses a **1.5 kg generic simulated vehicle**, configured by
+`vehicle_mass_kg` and the nine `link_masses_kg` entries in `bridge_config.json`.
+Those entries preserve the relative mass distribution measured from the asset;
+the source densities otherwise produced about **251,537 kg** at the composed
+scene scale. This is a lab model choice, not a measured physical drone mass.
+The bridge verifies that the total runtime PhysX mass matches the configuration
+before calibrating motor thrust.
+
+`rigid_frame: true` makes the eight arm/rotor joints fixed in the session layer.
+The force model assumes fixed rotor positions and simulates rotor speed and
+reaction torque itself. Allowing the source asset's links to hinge caused
+ground bouncing and large IMU spikes; correcting mass alone did not remove that
+motion. With the rigid frame, the disarmed vehicle settled with zero linear and
+angular velocity and PX4 preflight checks passed in the live recovery check.
+These session overrides leave the scene file and referenced asset unchanged and
+are reapplied by the bridge loader after a restart. Disarmed zero-wrench calls
+are skipped so they do not keep waking a resting articulation.
+
+Reset now requires PX4 preflight OK, a valid near-zero local ground position,
+low estimated velocity, fresh actuator feedback and a physically stable upright
+vehicle for ten checks before reporting READY. It does not arm or take off.
+A latched position-origin reset is reported directly as a reason to reset,
+rather than presented only as missing telemetry. A successful ground check is
+not a substitute for validating the changed mass/frame model in flight.
 
 The lab can be operated through command-line processes and Isaac's installed
 Python execution server. Desktop automation is unnecessary. The operator pastes
@@ -187,8 +282,11 @@ display alone does not mean the vehicle has returned to its starting pose.
 The previous map and run history are archived under `logs/experiment_*/`.
 `run.json` preserves the controller state and trail; `reset.json` records the
 reset result. The stopped starting pose and scene identity are stored in
-`logs/experiment_baseline.json` and checked on subsequent resets. Changing the
-scene or starting pose requires establishing a new baseline. Maze edits and
+`logs/experiment_baseline.json` as a record. **Scene placement takes precedence:**
+each reset uses the authored starting pose restored by Isaac Stop, including
+your placement edits, and updates this record. The previous baseline is archived
+as `previous_baseline.json`; it never overrides the scene or blocks an edited
+starting position. Maze edits and
 locked-arm settings remain in the open scene; the original scene file is not
 reopened or overwritten.
 
@@ -359,9 +457,15 @@ Wall observations are currently binary cell labels, not per-cell confidence
 scores. Completion requires an enclosed connected observed component supported
 by three fresh scans; it does not mean every wall cell was individually observed
 three times. Unknown gaps are retained rather than filled to force enclosure.
-The mapper accepts valid return rays up to 12 m, so the 10 m corridor width does
-not by itself require a close wall inspection. A changed viewpoint is useful
-when it resolves occlusion or missing observations.
+The mapper traces free space up to a 12 m horizon. A valid farther return
+(within the installed sensor's 200 m far range) still clears the observed segment
+up to that horizon; dropping the whole ray used to leave artificial unknown
+wedges. Only actual returns within the mapping horizon mark occupied cells;
+the cutoff never becomes a synthetic wall. Actual selected endpoints remain
+available for forward-clearance checks. Missing beams and space beyond the
+horizon stay unknown. The 10 m corridor width does not by itself require a
+close wall inspection. A changed viewpoint is useful when it resolves occlusion
+or missing observations.
 
 ## What the student is building
 
@@ -451,15 +555,16 @@ position-axis rotation. This distinction matters over metre-scale routes.
 
 The current experiment coordinator and sole PX4 setpoint publisher.
 It receives PX4 position/status/IMU periods, owns the map feed and dashboard,
-runs planning in a background thread, sends the 10 Hz Offboard heartbeat,
+runs planning in a background thread, sends the 20 Hz Offboard heartbeat,
 holds altitude, turns smoothly toward route segments, and advances the exploration session.
 Starting the program never arms or takes off. Explicit dashboard flight buttons
 can request native takeoff, Offboard and landing. The explore-and-land mission requests native
 PX4 Land after confirmed completion and successful map persistence.
 
 During navigation the nose follows the current planned route segment, with a
-45°/s yaw-rate limit and 90°/s² reference acceleration. It turns while travelling;
-a sharp corner can temporarily leave the nose behind the direction of movement.
+60°/s yaw-rate limit and 90°/s² reference acceleration. At major direction changes,
+it brakes toward near-hover while yawing, then accelerates once both measured and
+reference speed are at most 0.15 m/s and measured heading error is within 30°.
 The shortest angular error handles ±180° wrap. Captured estimator heading bias
 corrects the yaw target independently of the world/NED position-axis conversion.
 Hold, blocked/settled phases, stale maps and timing faults freeze the heading
@@ -618,8 +723,22 @@ PX4 Fast DDS/domain 0 provides versioned /fmu/out position/status/IMU topics.
 Commands are /fmu/in/offboard_control_mode and /fmu/in/trajectory_setpoint.
 Version suffixes depend on installed px4_msgs; the code derives them.
 
-The heartbeat uses steady computer time at 10 Hz. Route progress uses delivered
-simulated IMU integration periods. Slow Isaac physics therefore makes a flight
+The navigator heartbeat uses steady computer time at 20 Hz (standalone hover and
+step tools remain at 10 Hz). The navigator's position progression and velocity
+feedforward use the same elapsed Isaac `/clock` time. The Zenoh mapper forwards
+small clock records through its session-checked pipe independently of full maps;
+the Fast DDS controller does not assume it can subscribe directly to Zenoh.
+Delivered IMU periods remain a separate freshness watchdog and conservative
+session counter. Counting only delivered IMU periods for trajectory motion while
+commanding full velocity made the two references disagree when packets were lost.
+Clock resets, gaps above 0.25 simulated seconds, or stale clock records hold
+motion rather than catching up; three progressing samples reconfirm the clock.
+Between sparse clock publications, the previous validated velocity remains
+streamed only while IMU integration advances. Tracking compares current telemetry
+against the prior reference advanced by its velocity over the known elapsed
+simulation interval; it also records the unadvanced-target error. Otherwise a
+0.13 s physics batch at 3 m/s alone looks like a false 0.39 m tracking fault.
+Slow Isaac physics therefore makes a flight
 take longer in real time rather than compressing its target trajectory.
 Commands use timestamp=0 because this installed PX4 decoder assigns receipt
 time. Sensor timestamps are XRCE-adjusted and must not be copied into commands.
@@ -634,18 +753,20 @@ does not establish exact source-time synchronization or hide localization errors
 
 | Parameter                                                 | Prepared value                                      |
 | --------------------------------------------------------- | --------------------------------------------------- |
-| Cruise with adequate clear straight route                 | Up to 1.00 m/s                                      |
-| Full-cruise forward obstacle clearance in braking model   | About 3.15 m                                        |
+| Cruise with adequate clear straight route                 | Up to 3.00 m/s                                      |
+| Full-cruise forward obstacle clearance in braking model   | About 20.15 m                                       |
 | Approach between 1.0 and 0.65 m                           | Nominal taper toward 0.08 m/s; braking may lower it |
 | Clearance at/below 0.65 m, or no usable observed corridor | Hold/replan                                         |
 | Reference acceleration / bend speed cap                   | 0.25 m/s² / 0.15 m/s                                |
 | Braking reaction allowance                                | 0.50 simulated seconds                              |
+| Yaw rate / yaw acceleration                               | 60°/s / 90°/s²                                      |
+| Major-turn near-hover / restart heading error             | Both measured and reference speed ≤0.15 m/s / ≤30°  |
 | Target lead / tracking pause guard                        | 0.28 m / 0.35 m                                     |
 | Preferred obstacle margin / assumed vehicle radius        | 0.80 m / 0.30 m                                     |
 | Sensor near range / starting-area prior                   | 0.50 m / 0.60 m                                     |
-| Map dimensions / resolution                               | 320 × 120 cells / 0.20 m                            |
-| Map origin                                                | (−34, −27) m                                        |
-| Map extent                                                | 64 × 24 m                                           |
+| Map dimensions / resolution                               | 320 × 265 cells / 0.20 m                            |
+| Map origin                                                | (−34, −56) m                                        |
+| Map extent                                                | 64 × 53 m                                           |
 | Floor Z                                                   | −3.9803731091662193 m                               |
 | Maximum reached exploration viewpoints                    | 20                                                  |
 
@@ -656,27 +777,92 @@ advance more slowly when actual tracking lags. The dashboard separately shows
 reference and measured horizontal speed. A polyline bend/end can also slow it.
 The prior and body radius are assumptions; the start area must actually be clear.
 
-The selected cruise cap was doubled from 0.5 to 1.0 m/s after the reset on
-16 October. Green cells indicate observed traversable geometry, not permission
+The selected cruise cap is now 3.0 m/s. Green cells indicate observed traversable geometry, not permission
 to maintain maximum speed. The speed cap reserves reaction travel and stopping
 distance: `v × reaction_time + v² / (2 × deceleration) <= clearance − stop_distance`.
-With this profile full cruise needs about `0.65 + 1 × 0.5 + 1²/(2 × 0.25) = 3.15 m`
+With this profile full cruise needs about `0.65 + 3 × 0.5 + 3²/(2 × 0.25) = 20.15 m`
 clear ahead. The reference brakes before entering the bend zone and before goals.
 An endpoint-free forward strip requires fresh-map certification of the whole
 remaining route; missing sensor returns alone never permit motion. Target-lead,
 tracking-error and close-range stop limits are unchanged. This kinematic bound
-does not establish PX4's measured stopping distance or guarantee twice the actual
-flight speed. Offline response-lag and bend tests exercise the faster reference;
-the updated ideal occluded-room replay passes with three viewpoints and 30.48 m²
-newly observed. Full-speed live tracking and smooth yaw await the operator run.
+does not establish PX4's measured stopping distance or guarantee 3 m/s actual
+flight in a short corridor. Acceleration alone needs 12 simulated seconds to
+reach 3 m/s from rest. With a wall return only 12 m ahead, the current braking
+model permits about 2.26 m/s, regardless of the 3 m/s cap.
+
+The navigator now sends finite horizontal **velocity feedforward** equal to the
+validated position reference's actual advance per simulated second. Position
+remains the primary Offboard mode; height remains position-only. The installed
+PX4 position controller adds this velocity to its position-error correction.
+Without this term, the small target lead and current position gain can keep
+actual speed far below the requested cruise. Hold, blocked/stale maps, timing
+gaps and stopped simulation send zero horizontal feedforward. A fresh native
+landing still owns descent.
+
+The lead calculation intersects the route direction with the same 0.28 m circle
+around measured position. This allows the reference to catch up if the drone is
+slightly ahead, while preserving the distance limit and independent 0.35 m
+tracking pause. No PX4 gains or acceleration parameters were changed. Offline
+tests cover reference/response lag, bends, frame conversion, stale inputs and
+stopping. A simplified position-plus-velocity response reaches about 3 m/s on
+a 100 m test route; this is not a live Isaac validation or evidence that the
+current 58 m maze will allow full cruise. The earlier ideal occluded-room replay
+remains separate evidence about exploration, not high-speed flight.
+
+Turn coordination limits the change in the complete reference velocity vector,
+not just its magnitude. A route change over about 45 degrees relative to current
+reference motion first brakes that motion before accelerating in the new direction.
+This braking stage persists across frontier updates and waits for measured speed
+as well as reference speed to fall below 0.15 m/s. Yaw turns concurrently; once
+near-hover is reached, translation waits for heading error within 30°. The UI
+distinguishes braking from aligning yaw. Shallow updates keep travelling.
+Yaw looks along the upcoming curve. Speed retains full yaw permission within
+30 degrees of measured yaw error, easing to zero at 90 degrees. The planner
+rounds corners with tangent quadratic curves only when every sampled segment
+preserves observed safe space and the center/clearance cost within 2%. Otherwise
+it keeps the original corner and brakes for it. Curved samples have curvature
+and backward braking speed bounds; they are not individual stop points.
+A signed tracking governor reduces reference speed for lag or lateral error
+before the hard tracking gate. It does not slow the reference further when the
+vehicle is already ahead. The UI and decision records expose error and speed
+permission. Internal follower pauses also pause exploration and record diagnostics;
+tracking faults require intervention, rather than automatically retrying them.
+Each actual reference step, including braking away from a newly selected route,
+must pass the newest observed body-footprint mask. A close obstacle in the old
+braking direction still blocks motion. These changes retain the 0.28 m reference
+lead and independent 0.35 m tracking pause; the offline response model is not a
+measurement of real PX4 stopping distance. They are acceleration-limited, not
+jerk-limited trajectories or a globally optimized curve through the maze.
 
 ## Building and preparing a maze
 
 The original 8 m room used a 12 x 12 m map centred near (0,0). The operator's
-new maze is roughly 58 x 18 m; its configured map now spans world x=-34..30,
-y=-27..-3, with 320 x 120 cells at 0.2 m resolution. Map resolution, dimensions,
+maze was roughly 58 x 18 m. The added room extends below the old Y=-27 map edge.
+The configured map now spans world x=-34..30, y=-56..-3, with 320 x 265 cells at
+0.2 m resolution. The larger canvas does not import scene walls or pre-fill
+free space; only observed LiDAR rays populate it. Map resolution, dimensions,
 origin and floor height are launch-time settings. See docs/MAZE_SETUP.txt for
 collision preparation and the restart procedure after rebuilding the scene.
+
+Reset now exits the Python navigator after the disarmed reset succeeds; its
+launcher starts a fresh process so changed source and settings are actually
+loaded. The previous history is copied into the reset archive and restored for
+review/download. A source/configuration fingerprint warns in the UI while
+unloaded edits exist. Reset never arms or starts exploration.
+
+Map status is emitted at the existing 5 Hz wall-watchdog rate. Geometry fields
+are reused when the occupancy and confirmation masks have not changed, even if
+the scan counter advances. Map age limits remain unchanged. On a transient
+data-age gap, active exploration holds and may replan automatically only after
+three fresh aligned scans over at least one simulated second and a stable armed
+Offboard hover. Pose faults, tracking faults, worker failure and operator Hold
+do not receive this automatic recovery. Stop records include publication,
+cloud and clock ages to distinguish a data gap from an estimator disagreement.
+The expanded map uses SciPy's exact Euclidean distance transform to avoid the
+previous pairwise NumPy distance-field cost. Install `requirements-navigation.txt`
+in the ROS navigator's Python environment; the current lab has SciPy 1.18.1.
+NumPy/scalar fallbacks remain for comparison, and tests verify equal distances.
+See the [SciPy transform documentation](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.distance_transform_edt.html).
 
 Use 2.2 m or wider clear corridors initially. The preferred 0.8 m margin on
 both walls consumes 1.6 m before discretization; narrower passages can be
@@ -792,6 +978,103 @@ Manual goals and Hold cancel exploration. Leaving armed Offboard cancels it too.
 
 ## Teaching sequence and evidence
 
+### Engineering collaboration
+
+The aim is both a working drone and the student's ability to design, evaluate
+and debug autonomous systems. The student owns meaningful engineering decisions;
+the agent handles implementation, repetitive commands, routine debugging and
+verification. Desktop/UI automation is excluded from this workflow. Explain a
+script's purpose and state changes before executing it; use the authenticated
+Isaac connection and service tools instead of making the student relay commands.
+
+- At architecture choices, unexpected behavior and material trade-offs, first
+  ask for the student's explanation or prediction. Challenge missing assumptions
+  and competing explanations without immediately supplying the answer.
+- Keep routine implementation moving. Do not turn every edit into a lesson or
+  interrupt for decisions the agent can reasonably make.
+- Compare occasional predictions with recorded outcomes. Periodically ask the
+  student to explain a component or diagnose a hypothetical failure, increasing
+  difficulty and reducing guidance as understanding improves.
+- Distinguish an observation, a proposed cause and a verified cause. A dashboard
+  label, command acknowledgement or passing unit test alone does not establish
+  physical flight behavior.
+
+### Latest lesson: timing, tracking and a room transition — 19 October
+
+Three different comparisons matter: requested versus actual position measures
+following error; PX4 estimate versus Isaac truth measures estimation disagreement;
+clock/update age measures whether the controller has timely information. Compare
+positions at matching source timestamps and in a common coordinate frame before
+attributing a difference to communication or controller tuning.
+
+The first diagnostic recording reproduced two clock pauses at 17:09:25 and
+17:10:00 Prague time. Map geometry construction occupied the pipe reader for
+187–188 ms while the worker continued generating clocks. Updates queued behind
+that work and clock ages reached 265 and 281 ms, exceeding the unchanged 250 ms
+watchdog. No clock reset was recorded. Clock reading now runs separately from
+geometry processing, with one latest cumulative snapshot waiting for processing.
+A ground check recorded a maximum clock pipe delay of 16 ms; this does not
+guarantee timely delivery under every moving-flight workload.
+
+In the later exploration run, a new frontier route was selected at 17:28:01.
+The drone began braking from about 1 m/s. With a reference acceleration bound
+of 0.25 m/s², stopping from that speed takes about four simulated seconds and
+two metres under constant deceleration. This is a reference-planning calculation,
+not a measured physical stopping guarantee; host wall time also depends on
+simulation speed. A new geometric route cannot instantaneously redirect velocity.
+
+At 17:28:07, navigation paused because the fixed-height mapper rejected the
+altitude, not because the horizontal tracking guard fired. Isaac showed chassis
+height around 0.78 m above the configured floor, below the 0.80 m minimum;
+PX4 reported local height around 0.91 m. These heights use different origins.
+After converting PX4's estimate to world Z and matching source times, the
+vertical disagreement was about 0.20 m. Horizontal tracking error at the pause
+was about 0.12 m. A later return-home pause repeated the height-gate failure
+with horizontal error around 0.064 m. The origin of the vertical disagreement
+has not been established; widening the mapper gate would not explain it.
+
+The student chose braking to near-hover while yawing for major route changes,
+rather than a wide continuous turn. The new policy waits for both reference and
+measured speed at or below 0.15 m/s, then for measured heading error within 30°
+before accelerating. Frontier updates cannot bypass an unfinished braking stage.
+Shallow route changes continue moving. Prepared yaw rate rises from 45 to 60°/s;
+yaw acceleration stays at 90°/s². Acceleration and the 0.35 m tracking guard remain
+unchanged. This policy is implemented and tested; verify the dashboard's loaded
+and disk runtime versions after Restart before crediting a flight to it.
+
+The separate landing issue is also unresolved: a live check found Isaac's drone
+stationary on the floor while PX4 still reported armed in Land and its land
+detector reported `landed=False`. Physical floor contact and confirmed controller
+landing/disarm must be recorded separately.
+
+Useful follow-up reasoning checks, spread across experiments rather than asked
+all at once:
+
+1. What evidence distinguishes actual following lag from comparing samples taken
+   at different times?
+2. If the reference velocity reaches zero but the drone is still moving, what
+   should prevent acceleration onto a newly selected route?
+3. How would a controlled straight-flight versus braking/yaw comparison help
+   isolate the vertical disagreement?
+
+Next, investigate vertical estimate versus truth through a repeatable maneuver,
+then evaluate the new turn policy on the same layout. Record speed, heading,
+altitude disagreement and pause reasons around each target switch. Change one
+control/model assumption at a time. The independent recorder also now tolerates
+a busy Windows status file without abandoning raw recording; a status-file
+reporting failure must not be mistaken for loss of the recorded sensor stream.
+
+Evidence stays in ignored local logs:
+
+| Record                                            | What it establishes                                                                        |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `logs/current_run_timing_analysis.json`           | Original clock pauses and queued geometry/clock timing                                     |
+| `logs/separated_clock_live_check.json`            | Loaded clock separation, healthy ground transport and sampling limits                      |
+| `logs/tracking_and_room_transition_analysis.json` | Source-aligned vertical disagreement at two altitude-gate pauses                           |
+| `logs/near_hover_turn_checks.txt`                 | 291 passing Python tests, including measured-speed/yaw gating and shallow-turn regressions |
+
+### Repeatable exploration experiment
+
 One larger lab: hide a room behind two turns and press Explore once.
 Before running, ask the student to predict which frontier will be selected.
 During the run, identify one transition in each layer:
@@ -845,6 +1128,14 @@ previous selector is scoped to its running process. The recorder saves a frame
 on observed state/goal changes and at five simulated-second intervals when scans
 advance. It samples actual travel after at least 0.1 m of displacement. This is
 decision evidence, not a recording of every sensor scan.
+
+The controller's `pose_check` records the map pose, selected historical PX4
+pose, signed receipt-time difference, position error and heading error. The
+existing limits remain 0.20 m, 15 degrees and a 0.25 s nearest-sample gap.
+Pose-check stop events preserve the failed comparison even after later checks
+pass. These samples are paired by host receipt time; that does not prove their
+underlying sensor acquisition times coincide. A transient failure during motion
+needs timestamp/estimator investigation before changing the limits.
 
 Maps remain **provisional observations**. Frames include free/occupied cell
 revision counts, freshness, and the drone's body-footprint and preferred-margin
@@ -964,6 +1255,67 @@ Both are verification tools. They create no flight publishers or mode commands.
 
 ## Troubleshooting
 
+### Timestamped timing and tracking evidence
+
+Clock records are consumed by a dedicated pipe reader. Map clearance and center
+geometry are built on a separate thread, with just the newest cumulative map
+snapshot waiting for processing. This prevents a slow geometry calculation from
+holding clock records in the pipe. Scan integration and wall confirmation still
+happen upstream in the mapper; discarding an intermediate publication does not
+discard its accumulated wall evidence. Snapshot ages retain their original
+source times, and the 250 ms clock watchdog and map freshness checks remain in
+force. Pipe closure or a processing error revokes readiness; a calculation
+finishing afterward cannot clear that failure. This isolates geometry work, but
+does not guarantee that upstream ROS clock delivery or host scheduling is timely.
+
+The passive `diagnostics` service starts automatically with the navigator and
+survives a navigator restart or failed Reset. It never publishes flight commands.
+The dashboard's **Controller & clearance → Timestamped diagnostics** panel shows
+recording health, aligned error statistics, and download links. A pause saves a
+10-second pre-event and 2-second post-event window under `logs/timing_*/`.
+Continuous records remain in `events.jsonl`; dropped records and sequence gaps
+are reported, so incomplete recordings cannot masquerade as complete evidence.
+
+- `navigation/diagnostic_wire.py`: bounded, nonblocking localhost observations.
+- `tools/record_timing.py`: independent recorder, incident windows and summaries.
+- `tools/px4_timing_probe.py`: read-only native PX4 position and received
+  `trajectory_setpoint` snapshots, at up to 20 Hz wall time. No firmware rebuild.
+- `navigation/diagnostics.py`: offline source-time interpolation and evidence checks.
+- `tools/analyze_timing.py`: reproduce a summary from an incident JSON or JSONL log:
+
+```text
+python tools/analyze_timing.py logs/timing_<run>/events.jsonl --output logs/timing_summary.json
+```
+
+Isaac truth carries both SimulationManager time and the exact HIL_SENSOR time
+sent to PX4. The installed SITL source sets its monotonic clock from that sensor
+timestamp; native uORB `timestamp_sample` therefore provides the comparison axis.
+DDS timestamps are also retained but are explicitly marked XRCE-adjusted and are
+not assumed to be simulation timestamps. Capture and arrival times remain separate.
+Shared Windows host capture/receipt stamps use `perf_counter()` (QPC), not
+`monotonic()`: the installed Python 3.12 GetTickCount64 and Python 3.13 QPC
+monotonic clocks have different epochs. Producer-local monotonic stamps and WSL
+poll stamps retain their domain labels; only durations within those domains are
+compared. Native sample time remains the axis for physical position comparisons.
+
+The analyzer compares Isaac truth and the PX4 estimate at the same native sample
+time, then compares truth with the intended source-time route. Received PX4
+setpoints use zero-order hold, not interpolation; both physical tracking error
+and PX4's internal position error are reported. Native setpoint observations
+confirm receipt inside PX4, not motor execution. Snapshot polling can miss
+intermediate setpoints and does not establish an exact network latency.
+Missing brackets, gaps over 0.2 s in truth or 0.25 s in references, invalid position
+estimates, process resets and coordinate resets remain unavailable evidence.
+This is a diagnostic approximation with explicit sampling limits, not ground
+truth about continuous tracking between samples.
+
+Clock decisions now record the exact consumed interval, clock age, confirmation
+state, and backward/jump/stale reason atomically. Stage records include worker
+processing duration, pipe age, map geometry computation and navigator callback
+duration. These support distinguishing upstream clock delivery gaps, pipe/geometry
+delays and control-callback stalls without changing thresholds or automatically
+resuming. A recovered clock is displayed separately from the retained pause reason.
+
 | Symptom                                | Responsible layer to inspect                                                                                                 |
 | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | No dots                                | Isaac LiDAR graph, render product, Play, Zenoh router and cloud probe.                                                       |
@@ -995,6 +1347,12 @@ statements are not the current status; use this guide and newer dated evidence.
 
 ## Verification and development
 
+Latest full Python check, **19 October 2026: 291 tests passed**. This includes
+clock progress during blocked geometry, bounded pending snapshots, failure
+latching, busy diagnostic status-file recovery, and near-hover turn coordination.
+Offline tests and the clock ground check do not establish a successful moving
+flight with the newly prepared turn policy or resolve the vertical/landing issues.
+
 Run the full suite in the existing Pixi environment:
 
 ```cmd
@@ -1010,10 +1368,19 @@ passed 126 tests. The mission, trail memory and timing changes now pass
 **167 tests**, including 70 navigation tests. On 16 October the decision recorder,
 legacy recovery, command receipts, session renewal, wall retention and explicit
 flight buttons, smooth route yaw and braking-aware faster cruise bring the suite to **209 tests**, including 92 navigation tests.
-Twelve additional isolated JavaScript interaction checks run
-with `node tests/history_ui.test.cjs`; they exercise stable controls, immediate
-reset feedback, controller rejection and map replay without a browser or flight
-commands. Python lint/format and dashboard JavaScript checks also pass.
+The operator cockpit places flight telemetry and eight colored system indicators
+above the map. Hover or focus an indicator for its readiness details. Flight,
+navigation, Hold, Land and recovery controls share the Navigation panel. Loading
+indicators identify pending commands, route planning, replay and reset work;
+stale telemetry and lost connections cannot retain healthy state indicators.
+The full-width event log merges targets, decisions and command responses, with
+local 24-hour timestamps and links to recorded map frames. Map replay and
+controller diagnostics are available in expandable sections.
+
+Twenty-three isolated JavaScript interaction checks run with
+`node tests/history_ui.test.cjs`; they exercise stable controls, immediate reset
+feedback, controller rejection, map replay, cockpit readiness, loading states,
+disconnect/recovery and merged event history without sending flight commands.
 The new history/UI changes have not been checked in a live flight. The updated
 dashboard is serving and the reconnected simulator is playing disarmed; raw
 ground sensor captures and saved-scene settings were checked on 16 October.

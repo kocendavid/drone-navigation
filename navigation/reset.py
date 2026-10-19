@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -15,6 +16,27 @@ from .mission import assess_completion, save_map
 
 PROJECT = Path(__file__).resolve().parents[1]
 PX4 = "/home/finel/PX4-Autopilot/build/px4_sitl_default/bin/px4"
+
+
+def local_ground_ready(text):
+    """Require a valid stationary local estimate, not merely a physical contact."""
+    for field in ("xy_valid", "z_valid", "v_xy_valid", "v_z_valid"):
+        if not re.search(r"(?m)^\s+" + field + r":\s+True\s*$", text):
+            return False
+    values = []
+    for field in ("z", "vx", "vy", "vz"):
+        match = re.search(r"(?m)^\s+" + field + r":\s+([^\s]+)", text)
+        try:
+            values.append(float(match.group(1)) if match else math.nan)
+        except ValueError:
+            return False
+    z, vx, vy, vz = values
+    return (
+        all(math.isfinite(v) for v in values)
+        and abs(z) <= 0.15
+        and math.hypot(vx, vy) <= 0.1
+        and abs(vz) <= 0.1
+    )
 
 
 class EmptyFeed:
@@ -123,6 +145,25 @@ class ResetBackend:
         state = self.px4("status")
         if not re.search(r"(?m)^INFO\s+\[commander\]\s+Disarmed\s*$", state):
             return False
+        if "Preflight check: OK" not in self.px4("check"):
+            return False
+        estimate = self.command(
+            [
+                "wsl.exe",
+                "-d",
+                "Ubuntu",
+                "--exec",
+                PX4 + "-listener",
+                "--instance",
+                "0",
+                "vehicle_local_position",
+                "-n",
+                "1",
+            ],
+            timeout=8,
+        )
+        if not local_ground_ready(estimate):
+            return False
         output = self.isaac(
             "import builtins,json,numpy as np\n"
             "b=getattr(builtins,'_px4_isaac_bridge',None)\n"
@@ -212,17 +253,17 @@ class ExperimentReset:
                 raise RuntimeError("Isaac did not stop in the same scene")
             if baseline["start_up"][2] < 0.98:
                 raise RuntimeError("Starting drone pose is not upright; inspect scene placement")
+            if not all(math.isfinite(v) for v in baseline["start_xyz"] + baseline["start_up"]):
+                raise RuntimeError("Starting drone pose contains non-finite coordinates")
+            # Isaac Stop restores scene placement. The saved baseline is a record,
+            # never a command to override a placement edited by the user.
+            baseline["source"] = "scene_placement"
             baseline_file = self.project / "logs" / "experiment_baseline.json"
             if baseline_file.exists():
-                previous = json.loads(baseline_file.read_text(encoding="utf-8"))
-                if previous["scene"] != baseline["scene"] or any(
-                    abs(a - b) > 0.001 for a, b in zip(previous["start_xyz"], baseline["start_xyz"])
-                ):
-                    raise RuntimeError(
-                        "Scene or starting pose changed; establish a new experiment baseline"
-                    )
-            else:
-                baseline_file.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+                (folder / "previous_baseline.json").write_bytes(baseline_file.read_bytes())
+            temporary = baseline_file.with_suffix(".tmp")
+            temporary.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(baseline_file)
             self.update("RESTARTING_PX4", "Starting a fresh PX4 and DDS session", baseline=baseline)
             self.backend.service("stop", "px4")
             self.backend.service("stop", "agent")
@@ -239,7 +280,7 @@ class ExperimentReset:
                     stable_checks = stable_checks + 1 if self.backend.ground_ready() else 0
                 except (RuntimeError, OSError, subprocess.TimeoutExpired):
                     stable_checks = 0
-                if stable_checks >= 3:
+                if stable_checks >= 10:
                     break
                 time.sleep(0.5)
             else:

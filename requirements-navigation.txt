@@ -1,0 +1,2 @@
+# Navigator acceleration dependency, verified in the ROS Python 3.12 environment.
+scipy==1.18.1

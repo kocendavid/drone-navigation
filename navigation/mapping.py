@@ -3,17 +3,27 @@
 import math
 import numpy as np
 
+try:
+    from scipy.ndimage import distance_transform_edt as _edt
+except ImportError:
+    _edt = None
+
 UNKNOWN, FREE, OCCUPIED, START_AREA = 0, 1, 2, 3
 
 
-def distance_field(blocked, resolution, *, vectorized=True):
+def distance_field(blocked, resolution, *, vectorized=True, exterior_blocked=True):
     """Exact Euclidean distance to blocked cell centres; exterior is blocked.
 
-    Separable squared distance transform, avoiding a SciPy dependency. Chunked
-    NumPy minima release the GIL on larger maps. Subtract a half cell diagonal
-    to bound distance to cell area.
+    SciPy accelerates the exact transform when installed. The NumPy/scalar
+    reference remains available for verification and smaller environments.
+    Subtract a half cell diagonal to bound distance to cell area.
     """
-    mask = np.pad(np.asarray(blocked, dtype=bool), 1, constant_values=True)
+    mask = np.pad(np.asarray(blocked, dtype=bool), 1, constant_values=exterior_blocked)
+    if not mask.any():
+        return np.full(np.asarray(blocked).shape, np.inf)
+    if vectorized and _edt is not None:
+        distances = _edt(~mask)[1:-1, 1:-1]
+        return np.maximum(0.0, distances * resolution - resolution / math.sqrt(2))
     field = np.where(mask, 0.0, 1e9)
 
     if vectorized and field.size >= 1024:
@@ -65,9 +75,19 @@ def distance_field(blocked, resolution, *, vectorized=True):
 
 class RayMap:
     WALL_CONFIRMATION_SCANS = 3
+    MAPPING_RANGE_M = 12.0
+    # Matches the installed Example_Rotary sensor's configured far range.
+    SENSOR_FAR_RANGE_M = 200.0
 
     def __init__(
-        self, resolution=0.1, size=120, origin=(-6.0, -6.0), body_radius=0.3, clearance=1.1
+        self,
+        resolution=0.1,
+        size=120,
+        origin=(-6.0, -6.0),
+        body_radius=0.3,
+        clearance=1.1,
+        route_clearance_weight=8.0,
+        route_clearance_scale=2.0,
     ):
         self.resolution = resolution
         self.origin = np.array(origin, dtype=float)
@@ -77,6 +97,8 @@ class RayMap:
         self.confirmed_walls = np.zeros(shape, dtype=bool)
         self.body_radius = body_radius
         self.clearance = clearance
+        self.route_clearance_weight = route_clearance_weight
+        self.route_clearance_scale = route_clearance_scale
         self.scans = 0
 
     def cell(self, xy):
@@ -97,7 +119,7 @@ class RayMap:
         finite = np.isfinite(xyz).all(axis=1)
         xyz = xyz[finite]
         ranges = np.linalg.norm(xyz, axis=1)
-        xyz = xyz[(ranges >= max(near_range, 0.35)) & (ranges <= 12.0)]
+        xyz = xyz[(ranges >= max(near_range, 0.35)) & (ranges <= self.SENSOR_FAR_RANGE_M)]
         world = xyz @ np.asarray(world_rotation).T + world_translation
         slab = (world[:, 2] >= body_world_z - 0.3) & (world[:, 2] <= body_world_z + 0.4)
         world = world[slab]
@@ -121,14 +143,18 @@ class RayMap:
         radial = radial[selected]
         if len(hits) < 120:
             raise ValueError("Too little angular ray coverage for room mapping")
-        # Sample at half-cell intervals. Only valid return rays clear space;
-        # missing beams and space behind their endpoint are never cleared.
-        steps = np.arange(max(0.35, near_range), float(radial.max()), self.resolution / 2)
+        # A distant valid return still observes the free segment before it.
+        # Bound clearing to the mapping horizon, but retain actual endpoints
+        # for collision checks; the horizon is not a synthetic obstacle.
+        traced = np.minimum(radial, self.MAPPING_RANGE_M)
+        # Sample at half-cell intervals. Missing beams and space behind actual
+        # returns stay unknown; no angular interpolation fills occlusions.
+        steps = np.arange(max(0.35, near_range), float(traced.max()), self.resolution / 2)
         positions = (
             np.array(world_translation)[:2]
             + delta[:, None, :] / radial[:, None, None] * steps[None, :, None]
         )
-        before = steps[None, :] < radial[:, None] - self.resolution / 2
+        before = steps[None, :] < traced[:, None] - self.resolution / 2
         cells = np.floor((positions - self.origin) / self.resolution).astype(int)
         h, w = self.grid.shape
         good = (
@@ -142,7 +168,8 @@ class RayMap:
         free_cells[cells[:, :, 1][good], cells[:, :, 0][good]] = True
         endpoints = np.floor((hits - self.origin) / self.resolution).astype(int)
         good = (
-            (endpoints[:, 0] >= 0)
+            (radial <= self.MAPPING_RANGE_M)
+            & (endpoints[:, 0] >= 0)
             & (endpoints[:, 0] < w)
             & (endpoints[:, 1] >= 0)
             & (endpoints[:, 1] < h)

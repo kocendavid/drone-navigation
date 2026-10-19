@@ -174,6 +174,11 @@ class RunHistory:
                     ),
                     wall_policy=snap.model.wall_policy(),
                     safe="".join(np.where(snap.safe.ravel(), "1", "0").tolist()),
+                    centerline=(
+                        "".join(np.where(snap.centerline.ravel(), "1", "0").tolist())
+                        if getattr(snap, "centerline", None) is not None
+                        else ""
+                    ),
                     pose=list(snap.pose) if snap.valid else None,
                     trail=list(self.trail),
                     cell_changes=changes,

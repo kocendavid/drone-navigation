@@ -12,6 +12,8 @@ import time
 import numpy as np
 from .planning import plan
 from .history import RunHistory, CommandReceipts
+from .centering import routing_geometry
+from .diagnostics import read_status
 
 
 def validate_destination(point):
@@ -73,6 +75,44 @@ class Dashboard:
                     self.respond(200, html.replace("__TOKEN__", owner.token), "text/html")
                 elif self.path == "/api/state":
                     self.respond(200, owner.state())
+                elif self.path.startswith("/api/timing/download"):
+                    status = read_status(Path(__file__).parents[1])
+                    value = (
+                        status.get("log_file")
+                        if "recording=1" in self.path
+                        else (status.get("last_incident") or {}).get("path")
+                    )
+                    path = Path(value).resolve() if value else None
+                    if (
+                        path is None
+                        or not path.is_relative_to((Path(__file__).parents[1] / "logs").resolve())
+                        or not path.is_file()
+                    ):
+                        self.respond(404, dict(error="No timing evidence recorded yet"))
+                        return
+                    size = path.stat().st_size
+                    self.send_response(200)
+                    self.send_header(
+                        "Content-Type",
+                        "application/x-ndjson" if path.suffix == ".jsonl" else "application/json",
+                    )
+                    self.send_header(
+                        "Content-Disposition", 'attachment; filename="' + path.name + '"'
+                    )
+                    self.send_header("Content-Length", str(size))
+                    self.end_headers()
+                    with path.open("rb") as stream:
+                        while size:
+                            data = stream.read(min(65536, size))
+                            if not data:
+                                break
+                            self.wfile.write(data)
+                            size -= len(data)
+                elif self.path == "/api/home-route":
+                    try:
+                        self.respond(200, owner.plan_home())
+                    except (ValueError, TypeError) as exc:
+                        self.respond(400, dict(error=str(exc)))
                 elif self.path.startswith("/api/command-status?id="):
                     query = parse_qs(urlsplit(self.path).query)
                     command = next(
@@ -295,6 +335,25 @@ class Dashboard:
             raise ValueError(failure or "Waiting for fresh map")
         return point, plan(snap, snap.pose[:2], point)
 
+    def plan_home(self):
+        """Read-only demonstration of the same planner used by Return to start."""
+        report = self.report
+        run_id = self.history.run_id
+        if report.get("home_xy") is None:
+            raise ValueError("Start point not captured yet: first establish a stable mapped hover")
+        if self.reset is not None and self.reset.report()["busy"]:
+            raise ValueError("Wait for the experiment reset to finish")
+        point, path = self.plan_destination(report["home_xy"])
+        return dict(
+            path=path,
+            goal=point,
+            route_length_m=sum(math.dist(a, b) for a, b in zip(path, path[1:])),
+            straight_line_m=math.dist(path[0], point),
+            planning_policy="prefer_known_space_centers_and_clearance",
+            run_id=run_id,
+            note="Preview only. Return replans from the current pose/map and finishes hovering.",
+        )
+
     def state(self):
         snap, failure = self.feed.get()
         now = time.monotonic()
@@ -328,6 +387,7 @@ class Dashboard:
             history=self.history.report(),
             previous_history=self.previous_history.report() if self.previous_history else None,
             commands=commands,
+            timing_diagnostics=read_status(Path(__file__).parents[1]),
             map_assessment=(
                 "Provisional LiDAR observations; enclosure passes the fixed-height completion rule"
                 if (self.report.get("mission", {}).get("completion") or {}).get("complete")
@@ -335,6 +395,7 @@ class Dashboard:
             ),
         )
         if snap is not None:
+            _, centerline, _ = routing_geometry(snap)
             result.update(
                 map_fresh=not failure and snap.fresh(now),
                 map_reason=failure or snap.reason,
@@ -349,6 +410,8 @@ class Dashboard:
                 ),
                 wall_policy=snap.model.wall_policy(),
                 safe="".join(np.where(snap.safe.ravel(), "1", "0").tolist()),
+                centerline="".join(np.where(centerline.ravel(), "1", "0").tolist()),
+                planning_policy="prefer_known_space_centers_and_clearance",
                 pose=snap.pose if snap.valid else None,
                 hit_endpoints_xy=np.round(snap.hits, 3).tolist() if snap.valid else [],
                 scans=snap.scans,

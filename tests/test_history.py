@@ -239,6 +239,29 @@ class HistoryTests(unittest.TestCase):
         finally:
             hub.close()
 
+    def test_home_route_preview_is_read_only_and_uses_recorded_start(self):
+        snap = snapshot()
+        hub = Dashboard(SimpleNamespace(get=lambda: (snap, None)), Queue(), port=0)
+        try:
+            hub.report["home_xy"] = [0.5, 0.0]
+            response = json.load(urlopen(hub.url + "/api/home-route"))
+            self.assertEqual(response["goal"], [0.5, 0.0])
+            self.assertEqual(response["path"][-1], [0.5, 0.0])
+            self.assertGreaterEqual(response["route_length_m"], response["straight_line_m"])
+            self.assertEqual(response["run_id"], hub.history.run_id)
+            self.assertTrue(hub.commands.empty())
+            hub.report["home_xy"] = None
+            with self.assertRaises(HTTPError) as caught:
+                urlopen(hub.url + "/api/home-route")
+            self.assertIn("not captured", json.load(caught.exception)["error"])
+            hub.report["home_xy"] = [0.5, 0.0]
+            snap.fresh = lambda now: False
+            with self.assertRaises(HTTPError):
+                urlopen(hub.url + "/api/home-route")
+            self.assertTrue(hub.commands.empty())
+        finally:
+            hub.close()
+
     def test_frame_and_complete_download_are_read_only_and_previous_run_survives(self):
         with tempfile.TemporaryDirectory() as folder:
             history = RunHistory(Path(folder) / "decisions.jsonl")
