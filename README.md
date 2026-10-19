@@ -7,6 +7,10 @@ scene editing and explicit takeoff/flight-mode selection through the dashboard
 or PX4 console. The explicit explore-and-land
 mission can request landing after confirming completion and saving its map.
 
+The [teaching guide](TEACHER_GUIDE.md) explains each file's responsibilities,
+key functions and connections through the system. Previous mentoring notes and
+diagnostic findings are preserved in [teaching history](docs/history/TEACHING_NOTES_2026-10-19.md).
+
 Updated **2026-10-19**. The current maze configuration covers 64 × 53 m at
 0.2 m resolution, with floor Z near −3.98 m. Scene preparation and disarmed
 Isaac/PX4 readiness have been verified in individual ground checks. Recorded
