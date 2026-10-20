@@ -307,6 +307,7 @@
       .map-header,
       .section-heading {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
@@ -528,6 +529,7 @@
         margin: 12px -14px 0;
         max-height: 320px;
         overflow: auto;
+        overflow-anchor: none;
         scrollbar-gutter: stable;
         font:
           12px ui-monospace,
@@ -862,6 +864,7 @@
           <div class="map-header">
             <h2>Local map</h2>
             <p id="map-context" role="status">Live map · provisional observations</p>
+            <button id="live-view" class="primary" type="button" hidden>Return to live map</button>
           </div>
           <div class="map-viewport">
             <canvas
@@ -951,7 +954,7 @@
               No pending action.
             </div>
             <p id="note" class="help">Click observed space to preview a route.</p>
-            <details open>
+            <details>
               <summary>Frontier work list</summary>
               <p id="frontier-summary" class="help">
                 Frontiers appear from fresh map observations.
@@ -993,6 +996,9 @@
         <div class="section-heading">
           <h2>Event log</h2>
           <span id="log-count" class="log-meta">Latest first · targets / decisions / commands</span>
+          <button id="log-live-view" class="primary" type="button" hidden>
+            Return to live map
+          </button>
         </div>
         <ol id="event-log" class="event-log" aria-label="Flight events, latest first">
           <li class="log-empty">Waiting for events…</li>
@@ -1010,8 +1016,7 @@
             <label><input id="show-trail" type="checkbox" checked /> Flown path</label
             ><label><input id="show-targets" type="checkbox" checked /> Selected points</label
             ><label><input id="show-rays" type="checkbox" /> LiDAR return endpoints</label>
-            <button id="live-view">Return to live map</button
-            ><a id="download-history" href="/api/history/download" download>Download full log</a>
+            <a id="download-history" href="/api/history/download" download>Download full log</a>
           </div>
           <input
             id="history-slider"
@@ -1121,6 +1126,8 @@
         const checks = flight?.checks || {};
         const fresh = !disconnected && checks.telemetry_fresh === true;
         const reviewing = !!replayFrame || replaySource === "previous";
+        for (const id of ["live-view", "log-live-view"])
+          byId(id).hidden = !reviewing && !reviewPending;
         const reset = state?.experiment_reset;
         const flightBusy = !disconnected && !!state?.flight_controls?.busy;
         const requestBusy = pendingRequest && activeStatuses.includes(pendingRequest.status);
@@ -1554,7 +1561,7 @@
             "RECORDED MAP · " + logTime(frame.utc) + " · " + frame.phase + " · " + frame.reason;
           update();
         } catch (error) {
-          byId("review-status").textContent = error.message;
+          if (sequence === replaySequence) byId("review-status").textContent = error.message;
         } finally {
           if (sequence === replaySequence) {
             reviewPending = false;
@@ -1635,12 +1642,27 @@
             (a, b) =>
               (Date.parse(b.utc) || 0) - (Date.parse(a.utc) || 0) || Number(b.id) - Number(a.id),
           );
-          const root = byId("event-log"),
-            scroll = root.scrollTop;
+          const root = byId("event-log");
+          const source = JSON.stringify([replaySource, history?.run_id]);
+          const scrolled = root.dataset.source === source && root.scrollTop > 0;
+          const top = scrolled ? root.getBoundingClientRect().top : 0;
+          // Keep the entry being read at the same height, including partial rows.
+          // Retain alternatives in case the oldest entries leave the 160-row window.
+          const anchors = scrolled
+            ? Array.from(root.children)
+                .map((item) => ({
+                  key: item.dataset.logKey,
+                  offset: item.getBoundingClientRect().top - top,
+                  bottom: item.getBoundingClientRect().bottom - top,
+                }))
+                .filter((item) => item.key && item.bottom > 0)
+            : [];
           root.replaceChildren();
+          root.dataset.source = source;
           for (const row of rows.slice(0, 160)) {
             const item = document.createElement("li");
             item.className = "log-row";
+            item.dataset.logKey = String(row.id);
             const status = row.command?.status || row.target?.status || row.phase || row.kind;
             item.dataset.tone = /failed|rejected|expired|blocked|invalidated/i.test(status)
               ? "bad"
@@ -1669,6 +1691,15 @@
                   row.target.xy.map((v) => v.toFixed(1)).join(", ") +
                   ") m · "
                 : "") + (row.reason || "");
+            if (row.speed_decision) {
+              const speed = row.speed_decision;
+              message.textContent +=
+                " · expected " +
+                format(speed.expected_speed_m_s, " m/s") +
+                " · current " +
+                format(speed.current_speed_m_s, " m/s") +
+                (speed.action ? " · command " + speed.action.replaceAll("_", " ") : "");
+            }
             item.append(time);
             item.append(kind);
             item.append(message);
@@ -1687,7 +1718,20 @@
               "No events in this run yet. Targets, decisions and command responses appear here.";
             root.append(empty);
           }
-          root.scrollTop = scroll;
+          if (scrolled) {
+            const items = new Map(
+              Array.from(root.children).map((item) => [item.dataset.logKey, item]),
+            );
+            const anchor = anchors.find((entry) => items.has(entry.key));
+            root.scrollTop = anchor
+              ? root.scrollTop +
+                items.get(anchor.key).getBoundingClientRect().top -
+                root.getBoundingClientRect().top -
+                anchor.offset
+              : root.scrollHeight;
+          } else {
+            root.scrollTop = 0;
+          }
           byId("log-count").textContent = rows.length
             ? "Latest first · " + Math.min(rows.length, 160) + " of " + rows.length + " events"
             : "Latest first";
@@ -1902,7 +1946,7 @@
             ctx.fillRect(a[0] - 1, a[1] - 1, 2, 2);
           }
         route(view.preview, true);
-        route(view.path, false);
+        if (!["COMPLETE", "REACHED"].includes(view.phase)) route(view.path, false);
         for (const frontier of view.exploration?.frontier_catalog?.frontiers || []) {
           if (["merged", "resolved"].includes(frontier.status)) continue;
           ctx.fillStyle =
@@ -2107,19 +2151,30 @@
           state.yaw_mode === "face_route_smoothly"
             ? "Faces the route smoothly · up to " +
               state.settings?.yaw_rate_deg_s +
-              "°/s; holds heading when stopped."
+              "°/s" +
+              (state.settings?.yaw_misaligned_speed_m_s != null
+                ? "; heading error above 30° caps travel at " +
+                  state.settings.yaw_misaligned_speed_m_s +
+                  " m/s"
+                : "") +
+              "; holds heading in Hold."
             : "Running controller holds a fixed heading.";
         byId("actual-speed").textContent = format(state.measured_speed_m_s, " m/s");
         byId("tracking-status").textContent = state.tracking
-          ? "Tracking error " +
+          ? (state.tracking.reference_time_aligned
+              ? "Sample-time error "
+              : "Predicted tracking error ") +
             format(state.tracking.error_m, " m") +
             " · speed permission " +
             Math.round(100 * (state.tracking.speed_scale ?? 1)) +
-            "% · pauses above 0.35 m."
+            (state.motion_policy === "certified_stopping_space_then_replan"
+              ? "% · brakes above 0.25 m."
+              : "% · pauses above 0.35 m.")
           : "Tracking diagnostics appear during navigation.";
         byId("control-profile").textContent =
           state.control_profile === "position_with_route_velocity_feedforward"
             ? "Position + route velocity · " +
+              (state.acceleration_reference_ned_xy ? "acceleration feedforward · " : "") +
               state.target_stream_hz +
               " Hz. Speed is limited by braking, bends and tracking."
             : "Position targets only; tracking may limit actual speed.";
@@ -2337,14 +2392,16 @@
         "land",
       ])
         byId(id).onclick = () => sendAction(id === "go" ? "goal" : id);
-      byId("live-view").onclick = () => {
+      function returnToLive() {
         ++replaySequence;
         reviewPending = false;
         replayFrame = null;
         replaySource = "current";
         byId("review-status").textContent = "Live map";
         update();
-      };
+      }
+      byId("live-view").onclick = returnToLive;
+      byId("log-live-view").onclick = returnToLive;
       byId("home-preview").onclick = previewHome;
       byId("show-centers").onchange = draw;
       byId("show-trail").onchange = draw;

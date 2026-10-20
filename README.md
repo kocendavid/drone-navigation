@@ -17,7 +17,7 @@ Isaac/PX4 readiness have been verified in individual ground checks. Recorded
 exploration runs are available. Clock/geometry separation is loaded and has a
 ground transport check; the latest near-hover turn policy passes offline tests
 and still needs moving-flight evaluation. Vertical estimation disagreement and
-landing detection remain open issues. The current full Python suite passes 291 tests.
+landing detection remain open issues. The current full Python suite passes 347 tests.
 See [current maze setup](docs/MAZE_SETUP.txt) for the detailed procedure.
 
 ## Contents
@@ -91,11 +91,29 @@ As actual LiDAR fills a room, that area ceases to count as unknown. Existing
 travel/viewpoint history discourages revisiting the same observation positions.
 Continuous reconsideration has no switching-radius rule; frontier identity and
 fresh observation evidence determine whether to keep or retire current work.
+Optional destination and recentering updates preserve a short prefix of the
+current route. The planner starts the new tail at the prefix endpoint rather
+than at the drone's current position. Its length is two simulated seconds of
+current reference speed, with a 0.5 m minimum and the remaining route as its limit;
+`exploration_commit_horizon_s` configures the horizon (maximum 5 s).
+The prefix follows existing bends. Applying the result preserves the current
+position/velocity reference and trims samples already flown; a result whose
+join point has been passed is discarded. Both prefix and tail must pass the
+latest body-free map checks. New obstacles, invalid inputs, completion, Hold
+and explicit operator goals still take priority. Speed remains subject to
+curvature, yaw, acceleration and stopping limits throughout the committed path.
 
 This is a first geometric heuristic: short/thick walls, noisy geometry or
 unconfirmed endings can be missed, and two-room behavior needs a live run.
 It does not classify rooms or guarantee complete coverage. The independent
 enclosure/completion checks remain responsible for declaring exploration done.
+
+Fresh map analysis also checks completion during travel. Once the connected
+observed space is enclosed with no boundary to unknown, Explore clears its
+remaining destination, hovers and reports **COMPLETE**, even if the final
+viewpoint was never reached. Exhausting useful targets with unknown boundaries
+still reports unfinished exploration. Explore and land begins its existing
+fresh-scan verification and map-saving sequence before requesting landing.
 
 ## optimizedRoutePlanner: return home
 
@@ -755,24 +773,26 @@ does not establish exact source-time synchronization or hide localization errors
 
 ## Current settings
 
-| Parameter                                                 | Prepared value                                      |
-| --------------------------------------------------------- | --------------------------------------------------- |
-| Cruise with adequate clear straight route                 | Up to 3.00 m/s                                      |
-| Full-cruise forward obstacle clearance in braking model   | About 20.15 m                                       |
-| Approach between 1.0 and 0.65 m                           | Nominal taper toward 0.08 m/s; braking may lower it |
-| Clearance at/below 0.65 m, or no usable observed corridor | Hold/replan                                         |
-| Reference acceleration / bend speed cap                   | 0.25 m/s² / 0.15 m/s                                |
-| Braking reaction allowance                                | 0.50 simulated seconds                              |
-| Yaw rate / yaw acceleration                               | 60°/s / 90°/s²                                      |
-| Major-turn near-hover / restart heading error             | Both measured and reference speed ≤0.15 m/s / ≤30°  |
-| Target lead / tracking pause guard                        | 0.28 m / 0.35 m                                     |
-| Preferred obstacle margin / assumed vehicle radius        | 0.80 m / 0.30 m                                     |
-| Sensor near range / starting-area prior                   | 0.50 m / 0.60 m                                     |
-| Map dimensions / resolution                               | 320 × 265 cells / 0.20 m                            |
-| Map origin                                                | (−34, −56) m                                        |
-| Map extent                                                | 64 × 53 m                                           |
-| Floor Z                                                   | −3.9803731091662193 m                               |
-| Maximum reached exploration viewpoints                    | 20                                                  |
+| Parameter                                                 | Prepared value                                              |
+| --------------------------------------------------------- | ----------------------------------------------------------- |
+| Cruise with adequate clear straight route                 | Up to 1.20 m/s                                              |
+| Full-cruise forward obstacle clearance in braking model   | About 4.13 m                                                |
+| Approach between 1.0 and 0.65 m                           | Nominal taper toward 0.08 m/s; braking may lower it         |
+| Clearance at/below 0.65 m, or no usable observed corridor | Hold/replan                                                 |
+| Reference acceleration / bend speed cap                   | 0.25 m/s² / 0.15 m/s                                        |
+| Braking reaction allowance                                | 0.50 simulated seconds                                      |
+| Yaw rate / yaw acceleration                               | 60°/s / 90°/s²                                              |
+| Heading error above 30°                                   | Travel cap 0.70 m/s; heading alone does not request a stop   |
+| Major travel-direction change / replan launch             | Brake to stopped reference / stable hover ≤0.10 m/s         |
+| Lead / proactive tracking braking / warning               | 0.28 m / 0.25 m / 0.35 m; certified braking may exceed lead |
+| Preferred obstacle margin / assumed vehicle radius        | 0.80 m / 0.30 m                                             |
+| Sensor near range / starting-area prior                   | 0.50 m / 0.60 m                                             |
+| Map dimensions / resolution                               | 320 × 265 cells / 0.20 m                                    |
+| Map origin                                                | (−34, −56) m                                                |
+| Map extent                                                | 64 × 53 m                                                   |
+| Floor Z                                                   | −3.9803731091662193 m                                       |
+| Maximum reached exploration viewpoints                    | 20                                                          |
+| Optional route-update commitment horizon                  | 2.0 simulated seconds of current speed; minimum 0.5 m       |
 
 Distances are from the chassis/reference centre, not from rotor tips. The stop
 threshold is a decision trigger, not a measured stopping-distance guarantee.
@@ -781,62 +801,173 @@ advance more slowly when actual tracking lags. The dashboard separately shows
 reference and measured horizontal speed. A polyline bend/end can also slow it.
 The prior and body radius are assumptions; the start area must actually be clear.
 
-The selected cruise cap is now 3.0 m/s. Green cells indicate observed traversable geometry, not permission
+The selected cruise cap is now 1.2 m/s. Green cells indicate observed traversable geometry, not permission
 to maintain maximum speed. The speed cap reserves reaction travel and stopping
 distance: `v × reaction_time + v² / (2 × deceleration) <= clearance − stop_distance`.
-With this profile full cruise needs about `0.65 + 3 × 0.5 + 3²/(2 × 0.25) = 20.15 m`
+With this profile full cruise needs about `0.65 + 1.2 × 0.5 + 1.2²/(2 × 0.25) = 4.13 m`
 clear ahead. The reference brakes before entering the bend zone and before goals.
 An endpoint-free forward strip requires fresh-map certification of the whole
-remaining route; missing sensor returns alone never permit motion. Target-lead,
-tracking-error and close-range stop limits are unchanged. This kinematic bound
-does not establish PX4's measured stopping distance or guarantee 3 m/s actual
-flight in a short corridor. Acceleration alone needs 12 simulated seconds to
-reach 3 m/s from rest. With a wall return only 12 m ahead, the current braking
-model permits about 2.26 m/s, regardless of the 3 m/s cap.
+remaining route; missing sensor returns alone never permit motion. The certified
+stopping policy below governs tracking and lead-limit interventions. This kinematic bound
+does not establish PX4's measured stopping distance or guarantee cruise speed
+in a short corridor. Acceleration alone needs 4.8 simulated seconds to
+reach 1.2 m/s from rest. Goal, bend, tracking and yaw caps can reduce it further.
 
 The navigator now sends finite horizontal **velocity feedforward** equal to the
 validated position reference's actual advance per simulated second. Position
 remains the primary Offboard mode; height remains position-only. The installed
 PX4 position controller adds this velocity to its position-error correction.
 Without this term, the small target lead and current position gain can keep
-actual speed far below the requested cruise. Hold, blocked/stale maps, timing
-gaps and stopped simulation send zero horizontal feedforward. A fresh native
+actual speed far below the requested cruise. Healthy callbacks between clock/IMU
+batches retain the validated velocity even when neither stream delivered a new
+sample in that callback; they do not advance reference position. Requiring new IMU
+progress on every callback caused intermittent zero-feedforward pulses. Retention
+expires with Isaac clock freshness (0.25 wall seconds) and also requires fresh IMU
+timing, valid navigation state and current map checks. Hold, blocked/stale maps,
+timing gaps and stale/stopped simulation send zero horizontal feedforward. The
+timestamped reference log marks `feedforward_held_between_samples`. A fresh native
 landing still owns descent.
 
-The lead calculation intersects the route direction with the same 0.28 m circle
-around measured position. This allows the reference to catch up if the drone is
-slightly ahead, while preserving the distance limit and independent 0.35 m
-tracking pause. No PX4 gains or acceleration parameters were changed. Offline
+Horizontal **acceleration feedforward** now accompanies position and velocity.
+It is the vector change in validated reference velocity divided by the same
+consumed simulation interval, rotated into local NED without a position offset.
+Its magnitude must stay within the configured 0.25 m/s² bound; discontinuities
+omit acceleration feedforward instead of amplifying them. Braking supplies
+negative acceleration. Healthy callbacks between samples retain the last valid
+acceleration with velocity. Hold, invalid/stale inputs and stopped phases clear
+both; vertical acceleration stays unset. No PX4 gains were changed. This is
+acceleration feedforward, not a new jerk-limited trajectory generator.
+
+The lead calculation intersects the route direction with a 0.28 m circle
+around measured position. If enforcing that boundary would cut reference velocity,
+the live navigator starts a certified braking maneuver instead of clamping the
+position after acceleration limiting. The lead bound is not an instantaneous
+constraint during that maneuver. No PX4 gains or acceleration parameters were changed. Offline
 tests cover reference/response lag, bends, frame conversion, stale inputs and
 stopping. A simplified position-plus-velocity response reaches about 3 m/s on
 a 100 m test route; this is not a live Isaac validation or evidence that the
 current 58 m maze will allow full cruise. The earlier ideal occluded-room replay
 remains separate evidence about exploration, not high-speed flight.
 
-Turn coordination limits the change in the complete reference velocity vector,
-not just its magnitude. A route change over about 45 degrees relative to current
-reference motion first brakes that motion before accelerating in the new direction.
-This braking stage persists across frontier updates and waits for measured speed
-as well as reference speed to fall below 0.15 m/s. Yaw turns concurrently; once
-near-hover is reached, translation waits for heading error within 30°. The UI
-distinguishes braking from aligning yaw. Shallow updates keep travelling.
+For a route change over about 45 degrees relative to current reference or measured
+motion, turn coordination now reserves a stopping segment in the current travel
+direction. `navigation/braking.py` checks both stopping rays and the entire convex
+area between them against the latest observed body-footprint mask; LiDAR checks
+the available stopping distance too. Unknown and out-of-map space cannot certify
+a stop. Normal acceleration previews the next stopping envelope, starting braking
+before it would run beyond certified space.
+
+During this maneuver the reference decelerates at the configured 0.25 m/s² without
+the late position clamp. Frontier switching waits and yaw turns concurrently.
+Reference speed must reach zero, measured speed must be ≤0.15 m/s and position
+error ≤0.15 m before the follower requests a fresh route to the retained goal.
+There is no additional settling timer or yaw gate before this request: yaw must
+follow the fresh route rather than its provisional goal bearing. Once reference
+speed is zero, remaining measured motion is reported as settling, not renewed braking.
+The planner's stable-hover gate (speed ≤0.10 m/s and height checks) still applies.
+The fresh route's yaw speed limits apply before acceleration. No Resume command
+is required for this normal handover. Shallow updates keep travelling.
+Reached intermediate samples advance before the major-turn check, so a zero-length
+direction at a sample cannot initiate a braking handover. True turns and stopping-space
+checks still apply to the onward segment. Healthy callbacks with no new simulation
+time preserve yaw reference and rate; Hold, stale clocks and pacing gaps clear the rate.
 Yaw looks along the upcoming curve. Speed retains full yaw permission within
-30 degrees of measured yaw error, easing to zero at 90 degrees. The planner
-rounds corners with tangent quadratic curves only when every sampled segment
+30 degrees of measured yaw error. Above 30 degrees, a separate 0.7 m/s ceiling
+applies, including at 90 or 180 degrees; heading error alone never stops travel.
+The former heading-only 60-degree braking trigger and near-hover alignment wait
+are removed. Sharp changes of travel direction still require momentum braking;
+obstacles, tracking limits, curves and destination settling can still stop motion.
+The planner rounds corners with tangent quadratic curves, trying cuts up to 3 m
+on each leg (previously 1.5 m), only when every sampled segment
 preserves observed safe space and the center/clearance cost within 2%. Otherwise
-it keeps the original corner and brakes for it. Curved samples have curvature
+it retries smaller curves, then keeps the original corner and brakes for it.
+Curved samples have curvature
 and backward braking speed bounds; they are not individual stop points.
-A signed tracking governor reduces reference speed for lag or lateral error
-before the hard tracking gate. It does not slow the reference further when the
-vehicle is already ahead. The UI and decision records expose error and speed
-permission. Internal follower pauses also pause exploration and record diagnostics;
-tracking faults require intervention, rather than automatically retrying them.
-Each actual reference step, including braking away from a newly selected route,
-must pass the newest observed body-footprint mask. A close obstacle in the old
-braking direction still blocks motion. These changes retain the 0.28 m reference
-lead and independent 0.35 m tracking pause; the offline response model is not a
-measurement of real PX4 stopping distance. They are acceleration-limited, not
-jerk-limited trajectories or a globally optimized curve through the maze.
+A signed tracking governor reduces reference speed for lag or lateral error.
+With measured velocity and the envelope checker, its soft checks use the same
+tracking reference as the hard tracking guard. Forward speed is capped at the measured forward component
+plus an allowed closing speed: relative reaction travel and braking distance must
+fit within a 0.20 m predicted separation budget, including lateral error. This
+leaves 0.05 m before the 0.25 m guard and applies the configured reaction time and
+acceleration bound. Bounded steady lag can retain cruise; growing lag limits actual
+reference acceleration rather than only multiplying the cruise ceiling. Lateral
+divergence still reduces the cruise cap. The relative-motion model assumes the
+current measured forward speed; it cannot guarantee against sudden vehicle braking.
+With fresh measured velocity and the envelope checker, error above 0.25 m also
+requests certified braking before the former scalar latch. During a certified
+maneuver, error above 0.35 m is logged as `tracking_warning`, not a Pause by itself.
+The dashboard displays the reserved reference stopping segment, and state/diagnostics
+include `braking_envelope_xy`. Blocked/unobserved stopping space and invalid or stale
+state/time/frame inputs still stop navigation. The pure follower's fallback without
+a measured velocity vector and envelope checker retains its strict 0.35 m pause.
+
+Live tracking can now compare the PX4 position sample with a reference at that
+sample's source time. The Isaac bridge sends clock-only pairs (native HIL sensor
+microseconds and Isaac simulation nanoseconds) over nonblocking localhost UDP
+port 18789. Navigation never consumes simulated physical ground truth through
+this channel. Three consistent advancing pairs confirm the mapping; a reset,
+session change, offset jump, duplicate or stale pair cannot retain alignment.
+The navigator subscribes to XRCE `TimesyncStatus` and removes its signed clock
+offset from `VehicleLocalPosition.timestamp_sample`, checking the corresponding
+timesync epoch and rejecting ambiguous offsets. Arrival time is not substituted
+for sample time.
+
+A bounded reference history uses the exact Isaac clock stamp consumed by each
+control callback. It interpolates gaps up to 0.25 simulated seconds. Telemetry
+ahead of the last published reference may use at most 0.10 seconds of explicitly
+labelled constant-velocity prediction. Samples more than 0.25 seconds behind or
+0.10 seconds ahead of the consumed clock are rejected for alignment. Clock pairs
+expire after 0.25 wall seconds; timesync reports after 2 wall seconds. History is
+cleared across navigation phases, source-clock epochs, frame and DDS clock resets.
+When conversion/history is unavailable, the previous conservative prediction and
+tracking guards remain active; the sample is not reported as aligned or zero error.
+The raw 0.28 m lead and complete stopping-space checks remain in force too.
+Activation requires the normal disarmed Reset, which reloads both bridge and navigator.
+
+Every received navigation report also records a compact `type: "speed_decision"`
+row in the current `logs/decisions_*.jsonl` run history, without creating an extra
+visible event or map frame. Phase/reason changes record stop decisions too;
+unchanged idle states do not produce continuous history speed rows. The dashboard,
+map frames, `navigation_state.json`, periodic `navigation_trace.jsonl` and the
+timestamped recorder's control-rate `reference` records include the same
+`speed_decision` breakdown. Disk writes remain on the existing history/reporting
+workers, while timestamped diagnostics use the best-effort nonblocking emitter.
+
+Speed-decision fields distinguish:
+
+- `requested_cruise_m_s`: cruise ceiling after any caller restriction.
+- `caps_m_s` and `reductions`: obstacle approach/braking, route/goal/corner,
+  tracking and yaw ceilings, with each effective reduction and its source.
+- `selected_speed_m_s`: desired speed before acceleration and displacement limits.
+- `expected_speed_m_s`: resulting reference speed; `current_speed_m_s`: latest
+  measured drone speed, or null when unavailable.
+- `published_feedforward_speed_m_s`: the speed actually sent as feedforward,
+  which can be zero during a clock/watchdog hold even with a retained reference.
+- `action`, `reference_acceleration_m_s2`, `acceleration_limited` and
+  `ceiling_binding`: whether the command accelerated, decelerated, stayed steady
+  or waited for clock progress, and whether the reduced ceiling actually bound it.
+- Tracking lead/cross error, raw/predicted position error, prediction interval,
+  heading error, waypoint distance and braking cause provide the decision context.
+- `tracking_response` records the measured-speed-based ceiling. Measured forward
+  speed, current/allowed closing speeds and remaining lead budget explain it.
+- `tracking_alignment` identifies exact, interpolated, source-time-predicted or
+  fallback comparison, with source stamps, sample age and unavailability reason.
+  `tracking.reference_time_aligned` identifies whether that tick used the mapping.
+- `acceleration_reference_ned_xy` in state and `acceleration_ned_xy` in reference
+  diagnostics record the sent horizontal acceleration; omitted values are null.
+
+`dominant_limit` identifies the final effective ceiling reduction; an acceleration
+limit can still keep the current command below that ceiling. A "Slowing for
+tracking lag" event therefore displays expected/current speeds and the actual
+command action, making continued acceleration visible. Values are in metres and
+simulated seconds. Speed reports still pair the latest measured speed with the
+command; the tracking alignment fields describe position-error timing separately.
+
+Offline regressions cover the recorded 1.327 → 0.730 m/s clamp discontinuity,
+3 m/s 90°/180° handovers with response lag, occupied/unknown stopping space and
+automatic settle/replan through the navigator callback. These changes require a
+navigator reload and moving-flight comparison. They do not establish measured
+PX4 stopping distance, jerk-limited motion, or a globally optimized maze trajectory.
 
 ## Building and preparing a maze
 
@@ -1261,6 +1392,24 @@ Both are verification tools. They create no flight publishers or mode commands.
 
 ### Timestamped timing and tracking evidence
 
+Tracking work is separated from slow navigation work. Planning workers prepare
+route cell footprints and speed profiles; the flight callback checks those cells
+against the newest map using array operations, plus immediate connector/step and
+LiDAR checks. A changed map can still invalidate a route immediately. Frontier
+geometry and ledger updates run in a latest-snapshot worker; selection waits for
+a result belonging to the current map stamp. Visualization, status notices, disk
+reports and runtime fingerprint reads run outside the tracking callback. Reports
+retain their capture times. Workers have bounded pending input and cannot publish
+late results after shutdown. The follower and its mutable control state still
+have one owner; background workers cannot publish flight targets or change mode.
+
+`navigation/background.py`, `navigation/async_frontiers.py` and
+`navigation/prepared_route.py` implement this separation. Diagnostics record
+background work duration, superseded inputs and position receipt age. This is
+thread-based scheduling isolation, not a real-time guarantee. Scheduling isolation
+alone left the clamp/acceleration conflict unchanged. The subsequent certified
+braking change described above addresses that conflict without changing PX4 gains.
+
 Clock records are consumed by a dedicated pipe reader. Map clearance and center
 geometry are built on a separate thread, with just the newest cumulative map
 snapshot waiting for processing. This prevents a slow geometry calculation from
@@ -1351,9 +1500,11 @@ statements are not the current status; use this guide and newer dated evidence.
 
 ## Verification and development
 
-Latest full Python check, **19 October 2026: 291 tests passed**. This includes
+Latest full Python check, **19 October 2026: 347 tests passed**. This includes
 clock progress during blocked geometry, bounded pending snapshots, failure
-latching, busy diagnostic status-file recovery, and near-hover turn coordination.
+latching, busy diagnostic status-file recovery, near-hover turn coordination,
+setpoint progress with blocked background workers, prepared-route equivalence,
+new-obstacle rejection and isolated ROS node/worker startup and shutdown.
 Offline tests and the clock ground check do not establish a successful moving
 flight with the newly prepared turn policy or resolve the vertical/landing issues.
 
@@ -1381,7 +1532,7 @@ The full-width event log merges targets, decisions and command responses, with
 local 24-hour timestamps and links to recorded map frames. Map replay and
 controller diagnostics are available in expandable sections.
 
-Twenty-three isolated JavaScript interaction checks run with
+Thirty-one isolated JavaScript interaction checks run with
 `node tests/history_ui.test.cjs`; they exercise stable controls, immediate reset
 feedback, controller rejection, map replay, cockpit readiness, loading states,
 disconnect/recovery and merged event history without sending flight commands.

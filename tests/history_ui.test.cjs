@@ -84,6 +84,36 @@ function dashboard() {
   return { sandbox, state, element, drawn };
 }
 
+function logLayout(d) {
+  const root = d.element("event-log");
+  const height = (item) => (item.children[2]?.textContent.includes("wrapped") ? 90 : 40);
+  let scroll = 0;
+  Object.defineProperties(root, {
+    scrollHeight: { get: () => root.children.reduce((sum, item) => sum + height(item), 0) },
+    scrollTop: {
+      get: () => scroll,
+      set: (value) => {
+        scroll = Math.max(0, Math.min(value, root.scrollHeight - 120));
+      },
+    },
+  });
+  root.getBoundingClientRect = () => ({ top: 200, bottom: 320 });
+  const append = root.append;
+  root.append = function (item) {
+    append.call(this, item);
+    item.getBoundingClientRect = () => {
+      const above = root.children.slice(0, root.children.indexOf(item));
+      const top = 200 + above.reduce((sum, row) => sum + height(row), 0) - scroll;
+      return { top, bottom: top + height(item) };
+    };
+  };
+  return root;
+}
+
+function logEvent(id, reason = "New entry") {
+  return { id, utc: new Date(1792396800000 + id * 1000).toISOString(), kind: "decision", reason };
+}
+
 (async () => {
   {
     const d = dashboard();
@@ -179,9 +209,13 @@ function dashboard() {
     assert.equal(d.state.phase, "HOLD", "reviewing must not overwrite live telemetry");
     assert.equal(d.element("go").disabled, true);
     assert.equal(d.element("hold").disabled, false);
+    assert.equal(d.element("live-view").hidden, false);
+    assert.equal(d.element("log-live-view").hidden, false);
     d.element("live-view").onclick();
     assert.equal(d.sandbox.api.replay(), null);
     assert.equal(d.element("go").disabled, false);
+    assert.equal(d.element("live-view").hidden, true);
+    assert.equal(d.element("log-live-view").hidden, true);
   }
   {
     const d = dashboard();
@@ -371,6 +405,15 @@ function dashboard() {
     d.state.target_stream_hz = 20;
     d.sandbox.api.setState(d.state);
     assert.match(d.element("control-profile").textContent, /Position \+ route velocity.*20 Hz/);
+    d.state.acceleration_reference_ned_xy = [0.25, 0];
+    d.state.motion_policy = "certified_stopping_space_then_replan";
+    d.state.tracking = { error_m: 0.08, reference_time_aligned: true };
+    d.sandbox.api.setState(d.state);
+    assert.match(d.element("control-profile").textContent, /acceleration feedforward/);
+    assert.match(d.element("tracking-status").textContent, /Sample-time error.*brakes above 0.25/);
+    d.state.tracking.reference_time_aligned = false;
+    d.sandbox.api.setState(d.state);
+    assert.match(d.element("tracking-status").textContent, /Predicted tracking error/);
   }
   {
     const d = dashboard();
@@ -727,7 +770,158 @@ function dashboard() {
     d.sandbox.api.setState(d.state);
     assert.match(d.element("timing-recorder").textContent, /unavailable or stale/);
   }
-  console.log("26 dashboard interaction checks passed");
+  {
+    const d = dashboard();
+    const root = logLayout(d);
+    d.state.history.events = Array.from({ length: 10 }, (_, i) => logEvent(i + 1));
+    d.sandbox.api.setState(d.state);
+    root.scrollTop = 55;
+    const reading = root.children[1];
+    const top = reading.getBoundingClientRect().top;
+    d.state.history.events.push(logEvent(11, "A wrapped new entry"), logEvent(12));
+    d.sandbox.api.setState(d.state);
+    const retained = root.children.find((row) => row.dataset.logKey === reading.dataset.logKey);
+    assert.equal(retained.getBoundingClientRect().top, top, "prepend preserves the partial row");
+    assert.equal(root.scrollTop, 185);
+    d.state.history.events.find((event) => event.id === 10).reason = "Updated wrapped entry";
+    d.sandbox.api.setState(d.state);
+    const updated = root.children.find((row) => row.dataset.logKey === reading.dataset.logKey);
+    assert.equal(updated.getBoundingClientRect().top, top, "changed row heights preserve reading");
+    assert.equal(root.scrollTop, 235);
+  }
+  {
+    const d = dashboard();
+    const root = logLayout(d);
+    d.state.history.events = Array.from({ length: 10 }, (_, i) => logEvent(i + 1));
+    d.sandbox.api.setState(d.state);
+    d.state.history.events.push(logEvent(11));
+    d.sandbox.api.setState(d.state);
+    assert.equal(root.scrollTop, 0, "at the top, continue showing the newest entries");
+    assert.equal(root.children[0].dataset.logKey, "11");
+  }
+  {
+    const d = dashboard();
+    const root = logLayout(d);
+    d.state.history.events = Array.from({ length: 160 }, (_, i) => logEvent(i + 1));
+    d.sandbox.api.setState(d.state);
+    root.scrollTop = 500;
+    const reading = root.children[12];
+    const top = reading.getBoundingClientRect().top;
+    d.state.history.events.push(logEvent(161));
+    d.sandbox.api.setState(d.state);
+    assert.equal(root.children.length, 160);
+    assert.equal(root.scrollTop, 540, "row cap must not defeat scroll anchoring");
+    assert.equal(
+      root.children
+        .find((row) => row.dataset.logKey === reading.dataset.logKey)
+        .getBoundingClientRect().top,
+      top,
+    );
+    root.scrollTop = root.scrollHeight;
+    d.state.history.events.push(logEvent(162), logEvent(163), logEvent(164));
+    d.sandbox.api.setState(d.state);
+    assert.equal(root.scrollTop, root.scrollHeight - 120, "evicted rows stay at oldest retained");
+  }
+  {
+    const d = dashboard();
+    const root = logLayout(d);
+    d.state.history.events = Array.from({ length: 10 }, (_, i) => logEvent(i + 1));
+    d.sandbox.api.setState(d.state);
+    root.scrollTop = 100;
+    d.state.history.run_id = "new-run";
+    d.state.history.events.push(logEvent(11));
+    d.sandbox.api.setState(d.state);
+    assert.equal(root.scrollTop, 0, "a new run starts at its newest entry");
+  }
+  {
+    const d = dashboard();
+    d.state.history.events = [
+      {
+        id: 1,
+        utc: "2026-10-19T08:00:00Z",
+        kind: "state",
+        phase: "NAVIGATING",
+        reason: "Slowing for tracking lag",
+        speed_decision: {
+          expected_speed_m_s: 0.485,
+          current_speed_m_s: 0.35,
+          action: "accelerating",
+        },
+      },
+    ];
+    d.sandbox.api.setState(d.state);
+    const message = d.element("event-log").children[0].children[2].textContent;
+    assert.match(message, /Slowing for tracking lag/);
+    assert.match(message, /expected 0\.48.*m\/s/);
+    assert.match(message, /current 0\.35.*m\/s/);
+    assert.match(message, /command accelerating/);
+    d.state.history.events[0].speed_decision.current_speed_m_s = null;
+    d.sandbox.api.setState(d.state);
+    assert.match(d.element("event-log").children[0].children[2].textContent, /current —/);
+  }
+  {
+    for (const failed of [false, true]) {
+      const d = dashboard();
+      assert.equal(d.element("live-view").hidden, true);
+      assert.equal(d.element("log-live-view").hidden, true);
+      let respond, reject;
+      d.sandbox.fetch = () =>
+        new Promise((resolve, fail) => {
+          respond = resolve;
+          reject = fail;
+        });
+      const request = d.sandbox.api.reviewFrame(2);
+      assert.equal(d.element("log-live-view").hidden, false);
+      d.element("log-live-view").onclick();
+      assert.equal(d.sandbox.api.replay(), null);
+      assert.equal(d.element("go").disabled, false);
+      assert.equal(d.element("live-view").hidden, true);
+      if (failed) reject(new Error("Late replay error"));
+      else
+        respond({
+          ok: true,
+          json: async () => ({ ...d.state, id: 2, utc: new Date().toISOString() }),
+        });
+      await request;
+      assert.equal(d.sandbox.api.replay(), null, "late replay response cannot leave live view");
+      assert.equal(d.element("review-status").textContent, "Live map");
+      assert.equal(d.element("log-live-view").hidden, true);
+      assert.match(d.element("map-context").textContent, /LIVE MAP/);
+    }
+  }
+  {
+    const d = dashboard();
+    vm.runInContext(
+      "globalThis.routeCalls=[]; const renderRoute=route; route=(points,...args)=>{routeCalls.push(points);renderRoute(points,...args);};",
+      d.sandbox,
+    );
+    d.state.path = [
+      [0, 0],
+      [1, 1],
+    ];
+    d.state.history.trail = [
+      [0, 0],
+      [0.2, 0],
+    ];
+    for (const phase of ["NAVIGATING", "COMPLETE", "REACHED"]) {
+      d.sandbox.routeCalls.length = 0;
+      d.state.phase = phase;
+      d.sandbox.api.setState(d.state);
+      assert.equal(d.sandbox.routeCalls.includes(d.state.path), phase === "NAVIGATING");
+      assert.ok(
+        d.sandbox.routeCalls.includes(d.state.history.trail),
+        "flown trail remains visible",
+      );
+    }
+    d.sandbox.routeCalls.length = 0;
+    d.sandbox.fetch = async () => ({
+      ok: true,
+      json: async () => ({ ...d.state, id: 1, phase: "NAVIGATING", utc: new Date().toISOString() }),
+    });
+    await d.sandbox.api.reviewFrame(1);
+    assert.ok(d.sandbox.routeCalls.includes(d.state.path), "replay retains earlier active routes");
+  }
+  console.log("33 dashboard interaction checks passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

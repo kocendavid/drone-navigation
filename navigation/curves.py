@@ -4,7 +4,7 @@ import math
 import numpy as np
 
 
-def rounded_route(points, acceptable, maximum_cut=1.5, spacing=0.08):
+def rounded_route(points, acceptable, maximum_cut=3.0, spacing=0.08):
     points = [np.asarray(p, dtype=float) for p in points]
     result = [points[0]]
     for a, b, c in zip(points, points[1:], points[2:]):
@@ -47,20 +47,25 @@ def speed_profile(path, acceleration, cruise):
     limits = np.full(len(path), cruise, dtype=float)
     limits[-1] = 0.0
     for i in range(1, len(path) - 1):
-        a, b = path[i] - path[i - 1], path[i + 1] - path[i]
-        x, y = np.linalg.norm(a), np.linalg.norm(b)
-        if min(x, y) < 1e-8:
-            limits[i] = 0
-            continue
-        angle = math.acos(float(np.clip((a @ b) / (x * y), -1, 1)))
-        if angle > math.radians(12):
-            limits[i] = 0.0  # An unrounded corner has no finite turning radius.
-        elif angle > 1e-5:
-            curvature = 2 * math.sin(angle) / max(np.linalg.norm(a + b), 1e-8)
-            limits[i] = min(cruise, math.sqrt(0.6 * acceleration / curvature))
+        limits[i] = corner_limit(path, i, acceleration, cruise)
     for i in range(len(path) - 2, -1, -1):
         distance = np.linalg.norm(path[i + 1] - path[i])
         limits[i] = min(
             limits[i], math.sqrt(limits[i + 1] ** 2 + 2 * 0.6 * acceleration * distance)
         )
     return limits
+
+
+def corner_limit(path, i, acceleration, cruise):
+    """Unchanged curvature limit, also used for a prepared route's new connector."""
+    a, b = path[i] - path[i - 1], path[i + 1] - path[i]
+    x, y = np.linalg.norm(a), np.linalg.norm(b)
+    if min(x, y) < 1e-8:
+        return 0.0
+    angle = math.acos(float(np.clip((a @ b) / (x * y), -1, 1)))
+    if angle > math.radians(12):
+        return 0.0
+    if angle > 1e-5:
+        curvature = 2 * math.sin(angle) / max(np.linalg.norm(a + b), 1e-8)
+        return min(cruise, math.sqrt(0.6 * acceleration / curvature))
+    return cruise

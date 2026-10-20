@@ -355,7 +355,7 @@ class ExplorationSession:
 
     def start(self, snapshot, *, continuous=False, simulation_s=0.0):
         # Re-starting Explore in the same map retains unresolved work and IDs.
-        self.frontier_ledger.update(snapshot, frontiers(snapshot.model.grid))
+        self._observe_frontiers(snapshot)
         self.enabled = True
         self.phase = "SELECTING"
         self.reason = "Choosing a reachable frontier viewpoint"
@@ -383,8 +383,13 @@ class ExplorationSession:
             "Targets update during travel" if continuous else "Targets update after arrival"
         )
 
+    def _observe_frontiers(self, snapshot):
+        if hasattr(self.frontier_ledger, "observe_map"):
+            return self.frontier_ledger.observe_map(snapshot)
+        return self.frontier_ledger.update(snapshot, frontiers(snapshot.model.grid))
+
     def observe(self, snapshot, simulation_s):
-        changes = self.frontier_ledger.update(snapshot, frontiers(snapshot.model.grid))
+        changes = self._observe_frontiers(snapshot)
         if self.enabled:
             cells = int(((snapshot.model.grid == FREE) | (snapshot.model.grid == OCCUPIED)).sum())
             self.area_gain_m2 = (cells - self.baseline) * snapshot.model.resolution**2

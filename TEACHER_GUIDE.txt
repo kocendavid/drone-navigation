@@ -1,3 +1,0 @@
-The teacher and maintainer guide has moved to README.md in this directory.
-Open README.md for essential scripts, terminal roles, settings, maze setup,
-operation, teaching activities and experiment evidence.

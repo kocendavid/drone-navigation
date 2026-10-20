@@ -131,6 +131,10 @@ class IsaacPX4Bridge:
             str(self.config_path.parent / "navigation" / "diagnostic_wire.py")
         )
         self.diagnostics = diagnostic_source["DiagnosticEmitter"]("isaac_bridge")
+        clock_source = runpy.run_path(
+            str(self.config_path.parent / "navigation" / "source_time.py")
+        )
+        self.clock_pairs = clock_source["ClockPairEmitter"]()
         self.last_truth_us = 0
         self.last_position = None
         self.force = np.zeros(3)
@@ -246,6 +250,7 @@ class IsaacPX4Bridge:
             self.last_position = position.copy()
             if self.time_us - self.last_truth_us >= 40000:
                 self.last_truth_us = self.time_us
+                self.clock_pairs.emit(self.time_us, round(self.manager.get_simulation_time() * 1e9))
                 self.diagnostics.emit(
                     "isaac_truth",
                     px4_sim_us=self.time_us,
@@ -303,6 +308,7 @@ class IsaacPX4Bridge:
         self.transport.close()
         self.log.close()
         self.diagnostics.close()
+        self.clock_pairs.close()
         print(
             "[PX4 bridge] Closed. Restart PX4 and reload the bridge after an Isaac Stop/reset.",
             flush=True,

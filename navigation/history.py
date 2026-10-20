@@ -110,6 +110,21 @@ class RunHistory:
             phase, reason = report.get("phase"), report.get("reason", "")
             goal = tuple(report["goal"]) if report.get("goal") is not None else None
             changed = (phase, reason) != self.last_state or goal != self.last_goal
+            speed_decision = report.get("speed_decision")
+            if speed_decision is not None and (phase == "NAVIGATING" or changed):
+                # Compact numeric records follow the control reports without
+                # adding event-list rows or forcing expensive map frames.
+                self._write(
+                    dict(
+                        type="speed_decision",
+                        run_id=self.run_id,
+                        utc=utc_now(),
+                        simulation_s=simulation_s,
+                        trajectory_simulation_s=report.get("trajectory_simulation_s"),
+                        goal=list(goal) if goal else None,
+                        speed_decision=speed_decision,
+                    )
+                )
             fresh = snap is not None and snap.fresh(now)
             frame_id = (
                 self.sequence + 1
@@ -234,6 +249,7 @@ class RunHistory:
                     simulation_s=simulation_s,
                     frame_id=frame_id,
                     clearance_ahead_m=report.get("clearance_m"),
+                    speed_decision=speed_decision,
                 )
             self.last_state, self.last_goal = (phase, reason), goal
 

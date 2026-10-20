@@ -21,6 +21,7 @@ from navigation.planning import plan, segment_safe, astar, reachable_mask, route
 from navigation.centering import routing_geometry
 from navigation.curves import speed_profile
 from navigation.timing import TrajectoryClock
+from navigation.source_time import ReferenceHistory
 from navigation.motion import (
     RouteFollower,
     FrameAlignment,
@@ -403,13 +404,14 @@ class MotionTests(unittest.TestCase):
             follower.tick(
                 0.05, follower.target.copy(), np.array([[100, 0]]), heading_error=math.pi / 2
             )
-        np.testing.assert_array_equal(follower.target, [0, 0])
+        self.assertGreater(follower.target[0], 0)
         self.assertIn("yaw aligns", follower.reason)
         for _ in range(240):
             follower.tick(
                 0.05, follower.target.copy(), np.array([[100, 0]]), heading_error=math.radians(40)
             )
         slow_speed = follower.speed
+        self.assertAlmostEqual(slow_speed, 0.7)
         self.assertLess(slow_speed, follower.settings.cruise_m_s * 0.95)
         for _ in range(120):
             follower.tick(
@@ -519,7 +521,7 @@ class MotionTests(unittest.TestCase):
 
     def test_configured_cruise_tracks_a_goal_before_a_wall_with_response_lag(self):
         settings = load_settings()
-        self.assertEqual(settings.cruise_m_s, 3.0)
+        self.assertEqual(settings.cruise_m_s, 1.2)
         follower = RouteFollower(settings)
         follower.begin([[0.0, 0.0], [6.0, 0.0]])
         actual = np.zeros(2)
@@ -535,7 +537,7 @@ class MotionTests(unittest.TestCase):
                 break
         else:
             self.fail("Faster reference did not settle at its goal")
-        self.assertGreater(peak, 0.95)
+        self.assertGreater(peak, 0.75 * settings.cruise_m_s)
         self.assertLessEqual(peak, settings.cruise_m_s + 1e-12)
         self.assertGreater(minimum_clearance, settings.stop_distance_m)
 
@@ -595,7 +597,7 @@ class MotionTests(unittest.TestCase):
         self.assertLess(abs(math.remainder(yaw + math.pi / 2, 2 * math.pi)), 0.001)
 
     def test_yaw_freezes_when_stopped_or_simulation_time_is_unusable(self):
-        for desired, dt in ((None, 0.1), (1.0, 0), (1.0, 0.6), (1.0, math.nan)):
+        for desired, dt in ((None, 0.1), (None, 0), (1.0, -0.1), (1.0, 0.6), (1.0, math.nan)):
             yaw, rate = smooth_yaw(0.4, 0.2, desired, dt, 0.8, 1.5)
             self.assertEqual(yaw, 0.4)
             self.assertEqual(rate, 0)
@@ -715,6 +717,11 @@ def navigator_fixture():
     node.returning_home = False
     node.pacer_mark = 100.0
     node.unclocked_imu_s = 0.0
+    node.acceleration_reference_ned = np.zeros(2)
+    node.sample_timeline = None
+    node.reference_history = ReferenceHistory()
+    node.tracking_alignment = dict(mode="prediction_fallback")
+    node.alignment_counters = None
 
     # Most fixtures isolate control logic; dedicated timing tests exercise the
     # independent Isaac clock, including dropped IMU messages.
@@ -759,6 +766,7 @@ def navigator_fixture():
         "launch_plan",
         "launch_frontier",
         "exploration_tick",
+        "complete_exploration",
         "map_pose_matches",
         "mission_tick",
         "recovery_tick",
@@ -780,6 +788,47 @@ def navigator_fixture():
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_braking_completion_replans_retained_goal_without_operator_resume(self):
+        node, modes, targets, notices = navigator_fixture()
+        node.follower.begin([[2, 3], [2, 4]])
+        node.target_goal = np.array([2, 4])
+        node.follower.braking_envelope = np.tile([2.0, 3.0], (4, 1))
+        node.follower.turn_stage = "SETTLING"
+        node.position.heading = math.pi
+        node.exploration.enabled = True
+        node.exploration.phase = "TRAVELLING"
+        node.exploration.continuous = False
+        # Request a route without waiting for yaw or a dwell. Planner launch
+        # still waits for measured speed <=0.10 m/s, even below the follower's
+        # <=0.15 m/s handover threshold.
+        node.position.vx = -0.11
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            node.pacer.total_s += 0.05
+            GoalNavigator.publish_target(node)
+            self.assertEqual(node.follower.phase, "PLANNING", node.follower.reason)
+            node.pacer.total_s += 0.05
+            GoalNavigator.publish_target(node)
+            self.assertEqual(node.follower.phase, "PLANNING")
+            self.assertIsNone(node.plan_thread)
+            node.position.vx = -0.09
+            with patch("ros2_navigate.plan", return_value=[[2, 3], [2, 4]]):
+                node.pacer.total_s += 0.05
+                GoalNavigator.publish_target(node)
+                node.plan_thread.join(timeout=2)
+                self.assertFalse(node.plan_thread.is_alive())
+            node.pacer.total_s += 0.05
+            GoalNavigator.publish_target(node)
+        self.assertEqual(node.follower.phase, "NAVIGATING")
+        self.assertIsNone(node.follower.braking_envelope)
+        self.assertEqual(node.exploration.phase, "TRAVELLING")
+        self.assertTrue(node.exploration.enabled)
+        np.testing.assert_array_equal(node.target_goal, [2, 4])
+        self.assertEqual(len(modes), 4)
+        self.assertEqual(len(targets), 4)
+        self.assertGreater(node.follower.speed, 0)  # Heading alone no longer holds translation.
+        self.assertLessEqual(node.follower.speed, 0.25 * 0.10 + 1e-9)
+        self.assertFalse(any("0.35" in text for text in notices))
+
     def test_empty_route_after_alignment_keeps_hold_stream_and_dashboard_alive(self):
         for phase in ("HOLD", "PAUSED", "PLANNING"):
             node, modes, targets, _ = navigator_fixture()
@@ -808,7 +857,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(modes[-1].position)
         self.assertFalse(modes[-1].velocity)
         self.assertTrue(math.isnan(targets[-1].velocity[2]))
-        self.assertTrue(all(math.isnan(v) for v in targets[-1].acceleration))
+        np.testing.assert_allclose(targets[-1].acceleration[:2], expected / 0.05, atol=1e-6)
+        self.assertTrue(math.isnan(targets[-1].acceleration[2]))
 
     def test_navigator_dropped_imu_periods_do_not_change_reference_velocity_timebase(self):
         node, _, targets, _ = navigator_fixture()
@@ -836,7 +886,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(modes and targets)
         np.testing.assert_allclose(targets[-1].velocity[:2], [0, 0])
 
-    def test_sparse_clock_sample_does_not_pulse_velocity_to_zero_while_imu_advances(self):
+    def test_sparse_clock_and_imu_samples_do_not_pulse_velocity_to_zero_while_fresh(self):
         node, _, targets, _ = navigator_fixture()
         node.follower.begin([[2, 3], [2, 4]])
         node.follower.velocity = np.array([0, 0.3])
@@ -847,7 +897,28 @@ class RuntimeTests(unittest.TestCase):
             GoalNavigator.publish_target(node)
             np.testing.assert_allclose(targets[-1].velocity[:2], [0.3, 0], atol=1e-6)
             GoalNavigator.publish_target(node)  # No new clock or IMU progression.
-        np.testing.assert_allclose(targets[-1].velocity[:2], [0, 0])
+        np.testing.assert_allclose(targets[-1].velocity[:2], [0.3, 0], atol=1e-6)
+
+    def test_feedforward_between_batches_expires_with_real_clock_freshness(self):
+        node, _, targets, _ = navigator_fixture()
+        node.follower.begin([[2, 3], [2, 4]])
+        node.follower.velocity = np.array([0, 0.3])
+        node.follower.speed = 0.3
+        clock = TrajectoryClock()
+        for index in range(5):
+            clock.observe(index * 50_000_000, 99.8 + index * 0.05)
+        clock.consume(100.0)
+        node.trajectory_clock = clock
+        previous = node.follower.target.copy()
+        for now in (100.0, 100.05, 100.1, 100.2):
+            with patch("ros2_navigate.time.monotonic", return_value=now):
+                GoalNavigator.publish_target(node)
+            np.testing.assert_allclose(targets[-1].velocity[:2], [0.3, 0], atol=1e-6)
+            np.testing.assert_array_equal(node.follower.target, previous)
+        with patch("ros2_navigate.time.monotonic", return_value=100.26):
+            GoalNavigator.publish_target(node)
+        np.testing.assert_array_equal(targets[-1].velocity[:2], [0, 0])
+        self.assertEqual(node.follower.phase, "PAUSED")
 
     def test_feedforward_clears_on_hold_map_loss_pacing_gap_and_stopped_simulation(self):
         for scenario in ("hold", "map_loss", "callback_gap", "stopped_sim"):
@@ -866,6 +937,9 @@ class RuntimeTests(unittest.TestCase):
                     node.feed.get = lambda: (None, "Map unavailable")
                 elif scenario == "callback_gap":
                     node.last_callback = 99.0
+                elif scenario == "stopped_sim":
+                    node.trajectory_clock.consume = lambda now: None
+                    node.trajectory_clock.fresh = lambda now: False
                 GoalNavigator.publish_target(node)
             np.testing.assert_allclose(targets[-1].velocity[:2], [0, 0])
 
@@ -996,6 +1070,19 @@ class RuntimeTests(unittest.TestCase):
             node.update_yaw(0.1, 100.0, map_ready, gap)
             self.assertEqual(node.hold_yaw, 0.4)
             self.assertEqual(node.yaw_rate, 0)
+
+    def test_yaw_keeps_rate_between_healthy_clock_samples_but_clears_it_when_stale(self):
+        node, _, _, _ = navigator_fixture()
+        node.update_yaw(0.05, 100.0, True, 0.05)
+        yaw, rate = node.hold_yaw, node.yaw_rate
+        self.assertNotEqual(rate, 0)
+        node.update_yaw(0, 100.0, True, 0.05)
+        self.assertEqual(node.hold_yaw, yaw)
+        self.assertEqual(node.yaw_rate, rate)
+        node.trajectory_clock.fresh = lambda _: False
+        node.update_yaw(0, 100.0, True, 0.05)
+        self.assertEqual(node.hold_yaw, yaw)
+        self.assertEqual(node.yaw_rate, 0)
 
     def test_yaw_reference_remains_continuous_when_frontier_target_changes(self):
         node, _, _, _ = navigator_fixture()
@@ -1344,6 +1431,7 @@ class RuntimeTests(unittest.TestCase):
                 )
                 GoalNavigator.publish_target(node)
             self.assertEqual(node.mission.phase, "SAVING")
+            self.assertEqual(node.follower.path, [])
             self.assertEqual(commands, [])
             node.plan_results.put((node.plan_generation, "saved-map", None, "mission_saved"))
             GoalNavigator.publish_target(node)
@@ -1935,7 +2023,7 @@ class ExplorationTests(unittest.TestCase):
         self.assertEqual(modes[-1].timestamp, 0)
 
     def test_settings_enforce_sensor_stop_margin(self):
-        self.assertEqual(load_settings().cruise_m_s, 3.0)
+        self.assertEqual(load_settings().cruise_m_s, 1.2)
         with self.assertRaises(ValueError):
             NavigationSettings(stop_distance_m=0.5).validate()
         with self.assertRaises(ValueError):
@@ -1978,6 +2066,25 @@ class ExplorationTests(unittest.TestCase):
         self.assertEqual(node.exploration.phase, "FINISHED")
         self.assertEqual(node.follower.phase, "HOLD")
         self.assertEqual(modes[-1].timestamp, 0)
+
+    def test_plain_frontier_exhaustion_checks_enclosure_before_reporting_complete(self):
+        for unresolved in (False, True):
+            with self.subTest(unresolved=unresolved):
+                node, modes, targets, _ = navigator_fixture()
+                snap = node.feed.get()[0]
+                if unresolved:
+                    snap.model.grid[30, 30] = UNKNOWN
+                node.exploration.start(snap)
+                node.launch_frontier(snap)
+                node.plan_thread.join(5)
+                self.assertFalse(node.plan_thread.is_alive())
+                with patch("ros2_navigate.time.monotonic", return_value=100.0):
+                    GoalNavigator.publish_target(node)
+                self.assertEqual(node.exploration.phase, "FINISHED" if unresolved else "COMPLETE")
+                self.assertEqual(node.follower.phase, "HOLD" if unresolved else "COMPLETE")
+                self.assertFalse(node.exploration.enabled)
+                self.assertIsNone(node.target_goal)
+                self.assertTrue(modes and targets)
 
     def test_hold_discards_completed_frontier_selection_result(self):
         node, modes, targets, _ = navigator_fixture()

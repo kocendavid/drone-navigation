@@ -4,14 +4,29 @@ import math
 import unittest
 import numpy as np
 from navigation.timing import TrajectoryClock
-from navigation.curves import rounded_route
+from navigation.curves import rounded_route, corner_limit
 from navigation.motion import RouteFollower, smooth_yaw
 from navigation.settings import load_settings
 from navigation.frontier_ledger import boundary_geometry
 
 
 class TrajectoryTests(unittest.TestCase):
-    def test_major_retarget_waits_for_measured_near_hover_and_yaw_alignment(self):
+    def test_duplicate_clock_callbacks_preserve_yaw_turn_progress(self):
+        yaw = rate = duplicate_yaw = duplicate_rate = 0.0
+        limit, acceleration = math.radians(60), math.radians(90)
+        for _ in range(100):
+            duplicate_yaw, duplicate_rate = smooth_yaw(
+                duplicate_yaw, duplicate_rate, math.pi, 0.0, limit, acceleration
+            )
+            yaw, rate = smooth_yaw(yaw, rate, math.pi, 0.05, limit, acceleration)
+            duplicate_yaw, duplicate_rate = smooth_yaw(
+                duplicate_yaw, duplicate_rate, math.pi, 0.05, limit, acceleration
+            )
+            self.assertAlmostEqual(duplicate_yaw, yaw)
+            self.assertAlmostEqual(duplicate_rate, rate)
+        self.assertLess(abs(math.remainder(yaw - math.pi, 2 * math.pi)), math.radians(2))
+
+    def test_major_retarget_waits_for_measured_near_hover_then_moves_while_yaw_aligns(self):
         follower = RouteFollower(load_settings())
         follower.begin([[0, 0], [20, 0]])
         follower.velocity = np.array([0.6, 0.0])
@@ -53,9 +68,9 @@ class TrajectoryTests(unittest.TestCase):
             heading_error=math.radians(70),
             measured_speed=0.05,
         )
-        self.assertEqual(follower.turn_stage, "ALIGNING")
-        np.testing.assert_allclose(follower.target, target)
-        self.assertIn("aligning yaw", follower.reason)
+        self.assertIsNone(follower.turn_stage)
+        self.assertGreater(np.linalg.norm(follower.target - target), 0)
+        self.assertIn("yaw aligns", follower.reason)
         follower.tick(
             0.05,
             target,
@@ -66,7 +81,7 @@ class TrajectoryTests(unittest.TestCase):
         )
         self.assertIsNone(follower.turn_stage)
         self.assertGreater(follower.speed, 0)
-        self.assertLessEqual(follower.speed, 0.0125 + 1e-8)
+        self.assertLessEqual(follower.speed, 0.025 + 1e-8)
 
     def test_shallow_retarget_keeps_moving_without_near_hover_stage(self):
         follower = RouteFollower(load_settings())
@@ -144,6 +159,21 @@ class TrajectoryTests(unittest.TestCase):
         self.assertTrue(np.all(curve >= 0))
         self.assertTrue(np.all(curve <= 6))
         self.assertEqual(rounded_route(route, lambda points, original: False), route)
+
+    def test_wider_corner_arcs_reduce_curvature_and_allow_more_turn_speed(self):
+        route = [[0, 0], [10, 0], [10, 10]]
+        wide = [np.asarray(p) for p in rounded_route(route, lambda *_: True)]
+        narrow = [np.asarray(p) for p in rounded_route(route, lambda *_: True, maximum_cut=1.5)]
+        np.testing.assert_allclose(wide[1], [7, 0])
+        wide_speed = min(corner_limit(wide, i, 0.25, 1.2) for i in range(1, len(wide) - 1))
+        narrow_speed = min(corner_limit(narrow, i, 0.25, 1.2) for i in range(1, len(narrow) - 1))
+        self.assertGreater(wide_speed, narrow_speed * 1.35)
+
+    def test_wider_corner_retries_smaller_curve_when_clearance_rejects_it(self):
+        route = [[0, 0], [10, 0], [10, 10]]
+        constrained = rounded_route(route, lambda candidate, _: candidate[1][0] >= 8.5)
+        narrow = rounded_route(route, lambda *_: True, maximum_cut=1.5)
+        np.testing.assert_allclose(constrained, narrow)
 
     def test_shallow_rounded_bend_does_not_stop_at_each_sample(self):
         shallow = rounded_route([[0, 0], [12, 0], [24, 3]], lambda points, original: True)

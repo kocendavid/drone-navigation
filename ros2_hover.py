@@ -115,10 +115,12 @@ class HoverPublisher(Node):
         status_filename="ros2_hover_status.json",
         mode_notice="This script never arms or changes mode.",
         publish_period_s=0.1,
+        status_sink=None,
     ):
         super().__init__(node_name)
         self.height = height
         self.publish_period_s = publish_period_s
+        self.status_sink = status_sink
         self.state = HoverState()
         self.ready_samples = 0
         self.notice = None
@@ -144,7 +146,6 @@ class HoverPublisher(Node):
 
     def say(self, message):
         if message != self.notice:
-            self.get_logger().info(message)
             self.notice = message
             report = dict(
                 recorded_utc=datetime.now(timezone.utc).isoformat(),
@@ -158,6 +159,10 @@ class HoverPublisher(Node):
                 fault=self.state.fault,
                 note="Diagnostic snapshot at a message change, not a control heartbeat.",
             )
+            if getattr(self, "status_sink", None) is not None:
+                self.status_sink(message, report, self.output_path)
+                return
+            self.get_logger().info(message)
             try:
                 self.output_path.parent.mkdir(parents=True, exist_ok=True)
                 temporary = self.output_path.with_suffix(".tmp")

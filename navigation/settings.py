@@ -17,12 +17,14 @@ class NavigationSettings:
     turn_speed_m_s: float = 0.15
     yaw_rate_deg_s: float = 45.0
     yaw_acceleration_deg_s2: float = 90.0
+    yaw_misaligned_speed_m_s: float = 0.7
     target_lead_m: float = 0.28
     body_radius_m: float = 0.3
     obstacle_margin_m: float = 0.8
     near_range_m: float = 0.5
     exploration_max_goals: int = 20
     exploration_replan_interval_s: float = 2.0
+    exploration_commit_horizon_s: float = 2.0
     floor_z_m: float = -0.76965
     map_resolution_m: float = 0.1
     map_width_cells: int = 120
@@ -55,6 +57,7 @@ class NavigationSettings:
             self.cruise_m_s > 4.0
             or self.minimum_approach_m_s > self.cruise_m_s
             or self.turn_speed_m_s > self.cruise_m_s
+            or self.yaw_misaligned_speed_m_s > 4.0
         ):
             raise ValueError(
                 "Invalid approach/turn/cruise speed; this simulation supports cruise up to 4 m/s"
@@ -69,6 +72,8 @@ class NavigationSettings:
             raise ValueError("Braking reaction allowance must be at most two simulated seconds")
         if self.route_clearance_weight > 20 or self.route_clearance_scale_m > 10:
             raise ValueError("Route clearance weight must be at most 20 and scale at most 10 m")
+        if self.exploration_commit_horizon_s > 5.0:
+            raise ValueError("Exploration route commitment must be at most 5 simulated seconds")
         if (
             type(self.exploration_max_goals) is not int
             or not 1 <= self.exploration_max_goals <= 100
