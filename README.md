@@ -710,8 +710,46 @@ Re-measure if the sensor is moved. A frame_id string alone is not a transform.
 **ROS - Isaac Goal Navigator**
 
 tools/ros2_navigate.cmd runs ros2_navigate.py. It owns mapping and the local
-web server, and is the one program publishing PX4 targets while in Offboard.
+web server. The default `--control-backend cpp` uses a C++ component as the sole
+PX4 target/heartbeat publisher; Python retains planning and route validation.
 Keep it running. Its map-worker child is automatic and needs no extra window.
+
+Build the native component in the existing ROS/Pixi environment before launching:
+
+```powershell
+pixi run --manifest-path C:\IsaacSim-ros_workspaces\jazzy_ws\pixi.toml cmd /d /c tools\build_native_control.cmd
+```
+
+Source lives in `native_control/`; generated libraries live under ignored
+`.tools/native_control/`. Each build has a source fingerprint and a versioned
+filename, so rebuilding does not overwrite a loaded Windows DLL. The loader
+rejects stale or missing builds rather than silently choosing another backend.
+The normal disarmed Reset starts a new navigator process and loads the selected
+build. `tools/ros2_navigate.cmd --control-backend python` retains the original
+publisher and time implementation for comparison or rollback. Observer mode
+does not load the publisher. Benchmark method and results are in
+`benchmarks/README.md`.
+
+The native component owns ROS message construction/serialization, a dedicated
+publication thread with a 50 ms repeat interval, XRCE timesync subscription,
+Isaac trajectory-clock state, source-clock conversion and reference history. It uses a high-resolution
+Windows waitable timer and does not depend on the Python GIL to repeat a target.
+Each validated Python update publishes immediately; repeats never advance the
+reference position or invent a new route.
+Python updates can arrive just after a repeat, so actual publication frequency
+can exceed the nominal 20 Hz decision rate. This avoids adding a resampling delay.
+Permission expires 100 ms after the Python validation callback started.
+Invalid, old or revoked commands cannot renew
+it; landing, stale telemetry, duplicate publishers and shutdown revoke it.
+The native clock guard independently clears velocity/acceleration when trajectory
+time becomes stale. A rejected update pauses navigation and preserves the dashboard;
+an unpublished reference is not entered into history. The component never arms
+the drone or changes PX4 modes. Body-footprint, map and route checks remain in Python.
+
+This reduces publisher scheduling variation, not the cost of Python planning or
+the drone's physical response time. It does not provide a hard real-time guarantee
+on Windows. Reported `control_backend` and `native_publisher` counters identify
+the active backend, repeats, expirations and rejected commands.
 
 Isaac also stays running and playing. The bridge runs inside Isaac, not in an
 extra terminal. The LiDAR, /clock and world/body TF graphs run inside the scene.

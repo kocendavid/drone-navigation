@@ -2175,8 +2175,10 @@
           state.control_profile === "position_with_route_velocity_feedforward"
             ? "Position + route velocity · " +
               (state.acceleration_reference_ned_xy ? "acceleration feedforward · " : "") +
+              (state.control_backend === "cpp" ? "C++ publisher · " : "") +
               state.target_stream_hz +
-              " Hz. Speed is limited by braking, bends and tracking."
+              (state.control_backend === "cpp" ? " Hz decisions. " : " Hz. ") +
+              "Speed is limited by braking, bends and tracking."
             : "Position targets only; tracking may limit actual speed.";
         byId("fresh").textContent = state.map_fresh
           ? "Live · " + state.scans + " scans"

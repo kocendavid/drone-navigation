@@ -387,7 +387,7 @@ class TrackingSeparationTests(unittest.TestCase):
         node = None
         rclpy.init()
         try:
-            node = IsolatedNavigator(feed, hub, commands, load_settings())
+            node = IsolatedNavigator(feed, hub, commands, load_settings(), timeline_port=0)
             end = time.monotonic() + 0.15
             while time.monotonic() < end:
                 rclpy.spin_once(node, timeout_sec=0.02)

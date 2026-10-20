@@ -406,10 +406,12 @@ function logEvent(id, reason = "New entry") {
     d.sandbox.api.setState(d.state);
     assert.match(d.element("control-profile").textContent, /Position \+ route velocity.*20 Hz/);
     d.state.acceleration_reference_ned_xy = [0.25, 0];
+    d.state.control_backend = "cpp";
     d.state.motion_policy = "certified_stopping_space_then_replan";
     d.state.tracking = { error_m: 0.08, reference_time_aligned: true };
     d.sandbox.api.setState(d.state);
     assert.match(d.element("control-profile").textContent, /acceleration feedforward/);
+    assert.match(d.element("control-profile").textContent, /C\+\+ publisher/);
     assert.match(d.element("tracking-status").textContent, /Sample-time error.*brakes above 0.25/);
     d.state.tracking.reference_time_aligned = false;
     d.sandbox.api.setState(d.state);

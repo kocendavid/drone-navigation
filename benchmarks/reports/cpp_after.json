@@ -1,0 +1,164 @@
+{
+  "schema": 1,
+  "backend": "cpp",
+  "revision": "639c9fe633db67937c7a39560e6cd7b6409589f0",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "processor": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+  "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:36:12) [MSC v.1944 64 bit (AMD64)]",
+  "domain": 97,
+  "rmw": "rmw_fastrtps_cpp",
+  "seconds_per_scenario": 12,
+  "publication_mode": "python_submission",
+  "iterations": 10000,
+  "notes": [
+    "Isaac stopped; isolated replay/component benchmark, not flight validation.",
+    "High-resolution perf_counter; DDS observer is Python for both backends.",
+    "Background load is 10 ms Python CPU work followed by 10 ms wait.",
+    "C++ uses a high-resolution waitable timer on a native thread; this compares implementations, not language alone."
+  ],
+  "core": {
+    "units": "microseconds",
+    "clock_observe_consume_fresh": {
+      "samples": 10000,
+      "mean": 1.6801,
+      "p50": 1.3,
+      "p95": 2.2,
+      "p99": 4.3,
+      "maximum": 53.2
+    },
+    "sample_clock_conversion": {
+      "samples": 10000,
+      "mean": 1.34368,
+      "p50": 1.1,
+      "p95": 1.8,
+      "p99": 3.0,
+      "maximum": 45.2
+    },
+    "reference_record_and_interpolate_128": {
+      "samples": 10000,
+      "mean": 2.9673599999999998,
+      "p50": 2.3,
+      "p95": 3.9,
+      "p99": 8.8,
+      "maximum": 119.0
+    },
+    "aligned": 10000,
+    "checksum": 1576530000000
+  },
+  "measured_utc": "2026-10-20T09:49:54.950340+00:00",
+  "harness_sha256": "7f1bacbcdbc47665ac92b8a0a29706e7c95716941d89fe35dade2fd12575d7f5",
+  "working_tree_dirty": true,
+  "native_source_sha256": "479032dabbb9cbe9334d9d6928e2d817f9d522102ce3049cace1118613ce60ce",
+  "ros": [
+    {
+      "scenario": "idle",
+      "samples": 240,
+      "published_samples": 430,
+      "received": 240,
+      "publication_us": {
+        "samples": 240,
+        "mean": 51.23875,
+        "p50": 51.7,
+        "p95": 82.6,
+        "p99": 92.9,
+        "maximum": 160.1
+      },
+      "interval_ms": {
+        "samples": 429,
+        "mean": 27.83610606060606,
+        "p50": 47.0012,
+        "p95": 50.5275,
+        "p99": 50.5788,
+        "maximum": 50.6314
+      },
+      "absolute_interval_error_ms": {
+        "samples": 429,
+        "mean": 22.513742424242423,
+        "p50": 2.998800000000003,
+        "p95": 49.8532,
+        "p99": 49.8682,
+        "maximum": 49.9063
+      },
+      "overdue_gap_ms": {
+        "samples": 429,
+        "mean": 0.17492424242424262,
+        "p50": 0,
+        "p95": 0.5275000000000034,
+        "p99": 0.5788000000000011,
+        "maximum": 0.6313999999999993
+      },
+      "scheduled_lateness_ms": {
+        "samples": 240,
+        "mean": 2.89122125,
+        "p50": 2.8388,
+        "p95": 5.0973,
+        "p99": 6.4575,
+        "maximum": 12.2316
+      },
+      "dds_observation_us": {
+        "samples": 240,
+        "mean": 235.505,
+        "p50": 184.0,
+        "p95": 419.5,
+        "p99": 525.3,
+        "maximum": 670.5
+      },
+      "process_cpu_s": 0.546875
+    },
+    {
+      "scenario": "background_python_cpu",
+      "samples": 240,
+      "published_samples": 389,
+      "received": 240,
+      "publication_us": {
+        "samples": 240,
+        "mean": 53.57041666666667,
+        "p50": 52.1,
+        "p95": 78.8,
+        "p99": 140.0,
+        "maximum": 257.7
+      },
+      "interval_ms": {
+        "samples": 388,
+        "mean": 30.74861649484536,
+        "p50": 43.9799,
+        "p95": 50.4755,
+        "p99": 50.5297,
+        "maximum": 50.5566
+      },
+      "absolute_interval_error_ms": {
+        "samples": 388,
+        "mean": 19.51690824742268,
+        "p50": 6.389800000000001,
+        "p95": 49.8045,
+        "p99": 49.8179,
+        "maximum": 49.8546
+      },
+      "overdue_gap_ms": {
+        "samples": 388,
+        "mean": 0.13276237113402065,
+        "p50": 0,
+        "p95": 0.4754999999999967,
+        "p99": 0.5296999999999983,
+        "maximum": 0.5566000000000031
+      },
+      "scheduled_lateness_ms": {
+        "samples": 240,
+        "mean": 6.543670416666667,
+        "p50": 5.4918,
+        "p95": 12.1478,
+        "p99": 17.9827,
+        "maximum": 22.5631
+      },
+      "dds_observation_us": {
+        "samples": 240,
+        "mean": 235.87625,
+        "p50": 210.0,
+        "p95": 406.5,
+        "p99": 484.7,
+        "maximum": 574.4
+      },
+      "process_cpu_s": 4.046875
+    }
+  ]
+}

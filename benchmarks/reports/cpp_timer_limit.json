@@ -1,0 +1,145 @@
+{
+  "schema": 1,
+  "backend": "cpp",
+  "revision": "639c9fe633db67937c7a39560e6cd7b6409589f0",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "processor": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+  "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:36:12) [MSC v.1944 64 bit (AMD64)]",
+  "domain": 97,
+  "rmw": "rmw_fastrtps_cpp",
+  "seconds_per_scenario": 12,
+  "iterations": 10000,
+  "notes": [
+    "Isaac stopped; isolated replay/component benchmark, not flight validation.",
+    "High-resolution perf_counter; DDS observer is Python for both backends.",
+    "Background load is 10 ms Python CPU work followed by 10 ms wait.",
+    "C++ uses a high-resolution waitable timer on a native thread; this compares implementations, not language alone."
+  ],
+  "core": {
+    "units": "microseconds",
+    "clock_observe_consume_fresh": {
+      "samples": 10000,
+      "mean": 1.77961,
+      "p50": 1.4,
+      "p95": 2.5,
+      "p99": 5.1,
+      "maximum": 64.2
+    },
+    "sample_clock_conversion": {
+      "samples": 10000,
+      "mean": 1.49163,
+      "p50": 1.2,
+      "p95": 2.0,
+      "p99": 3.7,
+      "maximum": 174.2
+    },
+    "reference_record_and_interpolate_128": {
+      "samples": 10000,
+      "mean": 3.1612999999999998,
+      "p50": 2.4,
+      "p95": 4.3,
+      "p99": 10.5,
+      "maximum": 121.2
+    },
+    "aligned": 10000,
+    "checksum": 1576530000000
+  },
+  "measured_utc": "2026-10-20T09:43:24.455654+00:00",
+  "harness_sha256": "3e5cca135f0e3c7e2d291583daf33158d0967eb325ec43549c515c0ca8f79a95",
+  "working_tree_dirty": true,
+  "native_source_sha256": "db5f5e8ff708efe2955d8ae5315ef634890c2d50a8293d8604706d092277f6b2",
+  "ros": [
+    {
+      "scenario": "idle",
+      "samples": 240,
+      "received": 240,
+      "publication_us": {
+        "samples": 240,
+        "mean": 51.004583333333336,
+        "p50": 44.6,
+        "p95": 75.1,
+        "p99": 196.1,
+        "maximum": 418.2
+      },
+      "interval_ms": {
+        "samples": 239,
+        "mean": 50.000105857740586,
+        "p50": 50.1145,
+        "p95": 50.291,
+        "p99": 50.5253,
+        "maximum": 50.6078
+      },
+      "absolute_interval_error_ms": {
+        "samples": 239,
+        "mean": 0.21231757322175734,
+        "p50": 0.1880999999999986,
+        "p95": 0.38689999999999714,
+        "p99": 0.5253000000000014,
+        "maximum": 0.6077999999999975
+      },
+      "scheduled_lateness_ms": {
+        "samples": 240,
+        "mean": 0.282095,
+        "p50": 0.2737,
+        "p95": 0.5152,
+        "p99": 0.6273,
+        "maximum": 0.766
+      },
+      "dds_observation_us": {
+        "samples": 240,
+        "mean": 273.66791666666666,
+        "p50": 260.0,
+        "p95": 441.0,
+        "p99": 517.6,
+        "maximum": 743.4
+      },
+      "process_cpu_s": 0.546875
+    },
+    {
+      "scenario": "background_python_cpu",
+      "samples": 240,
+      "received": 240,
+      "publication_us": {
+        "samples": 240,
+        "mean": 45.29208333333333,
+        "p50": 41.6,
+        "p95": 58.9,
+        "p99": 105.9,
+        "maximum": 259.9
+      },
+      "interval_ms": {
+        "samples": 239,
+        "mean": 49.999524686192466,
+        "p50": 50.1166,
+        "p95": 50.2755,
+        "p99": 50.3338,
+        "maximum": 50.5095
+      },
+      "absolute_interval_error_ms": {
+        "samples": 239,
+        "mean": 0.20531966527196632,
+        "p50": 0.170499999999997,
+        "p95": 0.38819999999999766,
+        "p99": 0.4204000000000008,
+        "maximum": 0.8331999999999979
+      },
+      "scheduled_lateness_ms": {
+        "samples": 240,
+        "mean": 0.29201083333333333,
+        "p50": 0.2838,
+        "p95": 0.515,
+        "p99": 0.5655,
+        "maximum": 0.8844
+      },
+      "dds_observation_us": {
+        "samples": 240,
+        "mean": 1971.6316666666667,
+        "p50": 271.8,
+        "p95": 8440.0,
+        "p99": 10393.8,
+        "maximum": 10429.1
+      },
+      "process_cpu_s": 3.109375
+    }
+  ]
+}

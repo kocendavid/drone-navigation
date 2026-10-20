@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "checkpoint": "639c9fe633db67937c7a39560e6cd7b6409589f0",
+  "native_source_sha256": "479032dabbb9cbe9334d9d6928e2d817f9d522102ce3049cace1118613ce60ce",
+  "harness_sha256": "7f1bacbcdbc47665ac92b8a0a29706e7c95716941d89fe35dade2fd12575d7f5",
+  "rows": [
+    {
+      "metric": "Idle: late heartbeat gap beyond 50 ms",
+      "units": "ms",
+      "python_p95": 12.558900000000001,
+      "cpp_p95": 0.5275000000000034,
+      "ratio": 23.80834123222734
+    },
+    {
+      "metric": "Idle: publication interval error",
+      "units": "ms",
+      "python_p95": 12.558900000000001,
+      "cpp_p95": 49.8532,
+      "ratio": 0.2519176301621561
+    },
+    {
+      "metric": "Idle: message construction + publication",
+      "units": "\u00b5s",
+      "python_p95": 169.5,
+      "cpp_p95": 82.6,
+      "ratio": 2.0520581113801453
+    },
+    {
+      "metric": "Idle: new-decision scheduling delay",
+      "units": "ms",
+      "python_p95": 14.3555,
+      "cpp_p95": 5.0973,
+      "ratio": 2.8162949012222156
+    },
+    {
+      "metric": "Idle: Python DDS callback observation",
+      "units": "\u00b5s",
+      "python_p95": 602.1,
+      "cpp_p95": 419.5,
+      "ratio": 1.4352800953516092
+    },
+    {
+      "metric": "Python CPU load: late heartbeat gap beyond 50 ms",
+      "units": "ms",
+      "python_p95": 12.648400000000002,
+      "cpp_p95": 0.4754999999999967,
+      "ratio": 26.600210304942355
+    },
+    {
+      "metric": "Python CPU load: publication interval error",
+      "units": "ms",
+      "python_p95": 18.7906,
+      "cpp_p95": 49.8045,
+      "ratio": 0.3772871929243342
+    },
+    {
+      "metric": "Python CPU load: message construction + publication",
+      "units": "\u00b5s",
+      "python_p95": 143.2,
+      "cpp_p95": 78.8,
+      "ratio": 1.8172588832487309
+    },
+    {
+      "metric": "Python CPU load: new-decision scheduling delay",
+      "units": "ms",
+      "python_p95": 23.1648,
+      "cpp_p95": 12.1478,
+      "ratio": 1.9069131859266697
+    },
+    {
+      "metric": "Python CPU load: Python DDS callback observation",
+      "units": "\u00b5s",
+      "python_p95": 521.6,
+      "cpp_p95": 406.5,
+      "ratio": 1.283148831488315
+    },
+    {
+      "metric": "Trajectory clock update/consume/freshness",
+      "units": "\u00b5s",
+      "python_p95": 3.3,
+      "cpp_p95": 2.2,
+      "ratio": 1.4999999999999998
+    },
+    {
+      "metric": "Source timestamp conversion",
+      "units": "\u00b5s",
+      "python_p95": 4.7,
+      "cpp_p95": 1.8,
+      "ratio": 2.611111111111111
+    },
+    {
+      "metric": "128-sample reference history",
+      "units": "\u00b5s",
+      "python_p95": 14.1,
+      "cpp_p95": 3.9,
+      "ratio": 3.6153846153846154
+    }
+  ]
+}

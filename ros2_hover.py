@@ -116,6 +116,7 @@ class HoverPublisher(Node):
         mode_notice="This script never arms or changes mode.",
         publish_period_s=0.1,
         status_sink=None,
+        control_publisher=None,
     ):
         super().__init__(node_name)
         self.height = height
@@ -128,12 +129,16 @@ class HoverPublisher(Node):
         qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE
         )
-        self.mode_pub = self.create_publisher(
-            OffboardControlMode, "/fmu/in/offboard_control_mode", qos
-        )
-        self.target_pub = self.create_publisher(
-            TrajectorySetpoint, "/fmu/in/trajectory_setpoint", qos
-        )
+        self.native_control = control_publisher
+        if control_publisher is None:
+            self.mode_pub = self.create_publisher(
+                OffboardControlMode, "/fmu/in/offboard_control_mode", qos
+            )
+            self.target_pub = self.create_publisher(
+                TrajectorySetpoint, "/fmu/in/trajectory_setpoint", qos
+            )
+        else:
+            self.mode_pub, self.target_pub = control_publisher.mode, control_publisher.target
         version = getattr(VehicleLocalPosition, "MESSAGE_VERSION", 0)
         position_topic = "/fmu/out/vehicle_local_position" + (f"_v{version}" if version else "")
         self.position_sub = self.create_subscription(

@@ -718,6 +718,8 @@ def navigator_fixture():
     node.pacer_mark = 100.0
     node.unclocked_imu_s = 0.0
     node.acceleration_reference_ned = np.zeros(2)
+    node.native_control = None
+    node.control_backend = "python"
     node.sample_timeline = None
     node.reference_history = ReferenceHistory()
     node.tracking_alignment = dict(mode="prediction_fallback")

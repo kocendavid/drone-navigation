@@ -61,7 +61,13 @@ class MapSnapshot:
 
 class MapFeed:
     def __init__(
-        self, floor_z=-0.76965, near_range=0.5, obstacle_margin=0.8, body_radius=0.3, settings=None
+        self,
+        floor_z=-0.76965,
+        near_range=0.5,
+        obstacle_margin=0.8,
+        body_radius=0.3,
+        settings=None,
+        control_backend="python",
     ):
         self.settings = settings or NavigationSettings(
             near_range_m=near_range, obstacle_margin_m=obstacle_margin, body_radius_m=body_radius
@@ -74,7 +80,12 @@ class MapFeed:
         self.pending_map = None
         self.stopping = False
         self.maps_superseded = 0
-        self.trajectory_clock = TrajectoryClock()
+        if control_backend == "cpp":
+            from .native_control import NativeTrajectoryClock
+
+            self.trajectory_clock = NativeTrajectoryClock()
+        else:
+            self.trajectory_clock = TrajectoryClock()
         self.diagnostics = DiagnosticEmitter("map_feed")
         self.map_diagnostics = DiagnosticEmitter("map_geometry")
         self.snapshot = None

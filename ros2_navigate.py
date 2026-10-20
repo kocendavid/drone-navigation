@@ -55,7 +55,15 @@ RUNTIME = RuntimeVersion(Path(__file__).parent)
 
 
 class GoalNavigator(HoverPublisher):
-    def __init__(self, feed, dashboard, commands, settings=None):
+    def __init__(
+        self,
+        feed,
+        dashboard,
+        commands,
+        settings=None,
+        control_backend="python",
+        timeline_port=18789,
+    ):
         self.feed = feed
         self.diagnostics = DiagnosticEmitter("navigator")
         self.dashboard = dashboard
@@ -98,8 +106,24 @@ class GoalNavigator(HoverPublisher):
         self.yaw_desired = None
         self.velocity_reference_ned = np.zeros(2)
         self.acceleration_reference_ned = np.zeros(2)
-        self.sample_timeline = SampleTimeline()
-        self.reference_history = ReferenceHistory()
+        self.control_backend = control_backend
+        self.native_control = None
+        if control_backend == "cpp":
+            from navigation.native_control import (
+                NativeSampleTimeline,
+                NativeReferenceHistory,
+                NativePublisher,
+                NativeTrajectoryClock,
+            )
+
+            if not isinstance(self.trajectory_clock, NativeTrajectoryClock):
+                raise ValueError("C++ publisher requires the native trajectory clock")
+            self.sample_timeline = NativeSampleTimeline(port=timeline_port)
+            self.reference_history = NativeReferenceHistory()
+            self.native_control = NativePublisher(self.sample_timeline, self.trajectory_clock)
+        else:
+            self.sample_timeline = SampleTimeline(port=timeline_port)
+            self.reference_history = ReferenceHistory()
         self.tracking_alignment = dict(mode="prediction_fallback", reason="awaiting_clock_mapping")
         self.reference = None
         self.world_pose = None
@@ -121,6 +145,7 @@ class GoalNavigator(HoverPublisher):
             status_filename="ros2_navigation_status.json",
             mode_notice="Takeoff and mode changes require explicit Flight setup buttons; exploration never starts automatically.",
             publish_period_s=0.05,
+            control_publisher=self.native_control,
             status_sink=lambda message, report, path: self.notices.submit(
                 report["recorded_utc"], (message, report, path)
             ),
@@ -131,12 +156,13 @@ class GoalNavigator(HoverPublisher):
             self.on_status,
             qos_profile_sensor_data,
         )
-        self.create_subscription(
-            TimesyncStatus,
-            topic_for(TimesyncStatus, "/fmu/out/timesync_status"),
-            lambda message: self.sample_timeline.observe_timesync(message, time.monotonic()),
-            qos_profile_sensor_data,
-        )
+        if self.native_control is None:
+            self.create_subscription(
+                TimesyncStatus,
+                topic_for(TimesyncStatus, "/fmu/out/timesync_status"),
+                lambda message: self.sample_timeline.observe_timesync(message, time.monotonic()),
+                qos_profile_sensor_data,
+            )
         self.create_subscription(
             SensorCombined,
             topic_for(SensorCombined, "/fmu/out/sensor_combined"),
@@ -166,7 +192,11 @@ class GoalNavigator(HoverPublisher):
         self.notices.close()
         self.exploration.frontier_ledger.close()
         self.diagnostics.close()
+        if self.native_control is not None:
+            self.native_control.close()
         self.sample_timeline.close()
+        if hasattr(self.reference_history, "close"):
+            self.reference_history.close()
         return super().destroy_node()
 
     def publish_notice(self, item):
@@ -1029,6 +1059,7 @@ class GoalNavigator(HoverPublisher):
             self.command_feedback(item, "rejected", reason)
 
     def publish_target(self):
+        control_started_ns = time.perf_counter_ns()
         now = time.monotonic()
         retained_acceleration = self.acceleration_reference_ned.copy()
         self.velocity_reference_ned = np.zeros(2)
@@ -1066,6 +1097,8 @@ class GoalNavigator(HoverPublisher):
             and 0 <= self.pacer.total_s - self.landed_sim_s <= 2.0,
         )
         if landing or self.mission.phase in ("LANDING", "LANDED"):
+            if self.native_control is not None:
+                self.native_control.revoke()
             self.reject_pending_commands("PX4 owns landing; reset before requesting another flight")
             # Native PX4 now owns descent. Do not publish a competing hover target.
             self.follower.phase = self.mission.phase
@@ -1074,6 +1107,8 @@ class GoalNavigator(HoverPublisher):
             self.update_dashboard(now, snap, False)
             return
         if not self.state.fresh(now):
+            if self.native_control is not None:
+                self.native_control.revoke()
             self.reject_pending_commands(
                 "Fresh PX4 position is unavailable; no flight request was executed"
             )
@@ -1093,6 +1128,8 @@ class GoalNavigator(HoverPublisher):
             self.count_publishers(topic) > 1
             for topic in ("/fmu/in/offboard_control_mode", "/fmu/in/trajectory_setpoint")
         ):
+            if self.native_control is not None:
+                self.native_control.revoke()
             self.ready_samples = 0
             self.stop("Another flight-target publisher is present")
             self.reject_pending_commands("Another flight-target publisher is present")
@@ -1412,13 +1449,32 @@ class GoalNavigator(HoverPublisher):
         if self.alignment is not None and self.follower.target is not None:
             self.reference = self.alignment.ned(self.follower.target)
         self.update_yaw(dt, now, map_ready, gap)
-        mode, target = hover_messages(PX4_RECEIPT_TIMESTAMP, *self.reference, 1.0, self.hold_yaw)
-        # Position stays the primary Offboard control mode. PX4 adds finite XY
-        # velocity as feedforward; vertical control remains position-only.
-        target.velocity = [*map(float, self.velocity_reference_ned), math.nan]
-        target.acceleration = [*map(float, self.acceleration_reference_ned), math.nan]
-        self.mode_pub.publish(mode)
-        self.target_pub.publish(target)
+        if self.native_control is not None:
+            try:
+                self.native_control.submit(
+                    [*self.reference, -1.0],
+                    self.velocity_reference_ned,
+                    self.acceleration_reference_ned,
+                    self.hold_yaw,
+                    issued_ns=control_started_ns,
+                )
+            except RuntimeError as error:
+                self.native_control.revoke()
+                self.ready_samples = 0
+                self.reference_history.clear()
+                self.velocity_reference_ned = np.zeros(2)
+                self.acceleration_reference_ned = np.zeros(2)
+                self.stop(str(error), "PAUSED")
+                self.update_dashboard(now, snap, map_ready)
+                return
+        else:
+            mode, target = hover_messages(
+                PX4_RECEIPT_TIMESTAMP, *self.reference, 1.0, self.hold_yaw
+            )
+            target.velocity = [*map(float, self.velocity_reference_ned), math.nan]
+            target.acceleration = [*map(float, self.acceleration_reference_ned), math.nan]
+            self.mode_pub.publish(mode)
+            self.target_pub.publish(target)
         if self.follower.target is not None:
             self.reference_history.record(
                 reference_stamp,
@@ -1602,6 +1658,10 @@ class GoalNavigator(HoverPublisher):
             tracking_alignment=self.tracking_alignment,
             target_stream_hz=20,
             control_profile="position_with_route_velocity_feedforward",
+            control_backend=self.control_backend,
+            native_publisher=(
+                self.native_control.report() if self.native_control is not None else None
+            ),
             motion_policy="certified_stopping_space_then_replan",
             runtime=getattr(self, "runtime_status", None),
             yaw_mode="face_route_smoothly",
@@ -1808,6 +1868,12 @@ def main():
     parser.add_argument("--floor-z", type=float, help="Override the configured floor height")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--settings", type=Path, help="Launch-time navigation settings JSON")
+    parser.add_argument(
+        "--control-backend",
+        choices=("cpp", "python"),
+        default="cpp",
+        help="Native publication/timestamp core, or Python comparison backend",
+    )
     args = parser.parse_args()
     if (
         (args.floor_z is not None and not math.isfinite(args.floor_z))
@@ -1828,6 +1894,7 @@ def main():
         settings.obstacle_margin_m,
         settings.body_radius_m,
         settings=settings,
+        control_backend="python" if args.observe else args.control_backend,
     )
     dashboard = None
     node = None
@@ -1861,7 +1928,7 @@ def main():
                 dashboard.observe(dashboard.report, snap, time.monotonic())
                 time.sleep(0.25)
         else:
-            node = GoalNavigator(feed, dashboard, commands, settings)
+            node = GoalNavigator(feed, dashboard, commands, settings, args.control_backend)
             flight_backend = NativeFlightBackend()
             dashboard.flight_controls = FlightControls(
                 lambda: dashboard.report,
