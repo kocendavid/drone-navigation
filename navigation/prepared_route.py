@@ -3,7 +3,7 @@
 import math
 import numpy as np
 
-from .curves import speed_profile, corner_limit
+from .curves import speed_profile, corner_limit, LATERAL_ACCELERATION_SHARE
 from .planning import line_cells, segment_safe
 from .braking import swept_space_safe
 
@@ -92,14 +92,20 @@ class PreparedRoute(list):
                 corner_limit(path, 1, cfg.acceleration_m_s2, cfg.cruise_m_s),
                 math.sqrt(
                     result.limits[2] ** 2
-                    + 1.2 * cfg.acceleration_m_s2 * np.linalg.norm(path[2] - path[1])
+                    + 2
+                    * LATERAL_ACCELERATION_SHARE
+                    * cfg.acceleration_m_s2
+                    * np.linalg.norm(path[2] - path[1])
                 ),
             )
         result.limits[0] = min(
             cfg.cruise_m_s,
             math.sqrt(
                 result.limits[1] ** 2
-                + 1.2 * cfg.acceleration_m_s2 * np.linalg.norm(path[1] - path[0])
+                + 2
+                * LATERAL_ACCELERATION_SHARE
+                * cfg.acceleration_m_s2
+                * np.linalg.norm(path[1] - path[0])
             ),
         )
         result.recenter_improves = self.recenter_improves

@@ -858,6 +858,12 @@ function logEvent(id, reason = "New entry") {
         kind: "state",
         phase: "NAVIGATING",
         reason: "Slowing for tracking lag",
+        tracking: {
+          predicted_reference_xy: [2.72, -1.1],
+          reference_xy: [2.68, -1.1],
+          measured_xy: [2.55, -1.1],
+          error_m: 0.17,
+        },
         speed_decision: {
           expected_speed_m_s: 0.485,
           current_speed_m_s: 0.35,
@@ -868,12 +874,27 @@ function logEvent(id, reason = "New entry") {
     d.sandbox.api.setState(d.state);
     const message = d.element("event-log").children[0].children[2].textContent;
     assert.match(message, /Slowing for tracking lag/);
-    assert.match(message, /expected 0\.48.*m\/s/);
-    assert.match(message, /current 0\.35.*m\/s/);
-    assert.match(message, /command accelerating/);
+    assert.match(message, /expected XY \(2\.72, -1\.10\) m/);
+    assert.match(message, /current XY \(2\.55, -1\.10\) m/);
+    assert.match(message, /tracking error 0\.17 m/);
+    assert.doesNotMatch(message, /m\/s|command accelerating/);
+    // Old recordings have the error but no position snapshot. Never use live positions.
+    delete d.state.history.events[0].tracking;
+    d.state.history.events[0].speed_decision.tracking_error_m = 0.17;
+    d.state.tracking = { predicted_reference_xy: [99, 99], measured_xy: [98, 98] };
+    d.sandbox.api.setState(d.state);
+    const older = d.element("event-log").children[0].children[2].textContent;
+    assert.match(older, /expected XY — · current XY — · tracking error 0\.17 m/);
+    assert.doesNotMatch(older, /99|98|m\/s/);
+    d.state.history.events[0].reason = "Speed capped while yaw aligns with route";
+    d.sandbox.api.setState(d.state);
+    const yaw = d.element("event-log").children[0].children[2].textContent;
+    assert.match(yaw, /expected speed 0\.48.*m\/s/);
+    assert.match(yaw, /current speed 0\.35.*m\/s/);
+    assert.match(yaw, /command accelerating/);
     d.state.history.events[0].speed_decision.current_speed_m_s = null;
     d.sandbox.api.setState(d.state);
-    assert.match(d.element("event-log").children[0].children[2].textContent, /current —/);
+    assert.match(d.element("event-log").children[0].children[2].textContent, /current speed —/);
   }
   {
     for (const failed of [false, true]) {

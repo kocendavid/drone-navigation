@@ -3,12 +3,72 @@
 import copy
 import json
 import runpy
+import threading
 import time
 from pathlib import Path
 import numpy as np
 from .model import RotorModel, SensorModel, rotation_wxyz, resolve_gravity_direction
 from .transport import SimulatorTransport, wsl_address
 from .mass import configured_link_masses
+
+
+class BridgeLog:
+    """Best-effort file/console output with one newest pending diagnostic."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.condition = threading.Condition()
+        self.pending = None
+        self.stopping = False
+        self.error = None
+        self.superseded = 0
+        self.thread = threading.Thread(target=self._run, name="bridge_log", daemon=True)
+        self.thread.start()
+
+    def submit(self, entry):
+        with self.condition:
+            if self.stopping:
+                return
+            self.superseded += int(self.pending is not None)
+            self.pending = entry
+            self.condition.notify()
+
+    def _write(self, entry):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry) + "\n")
+        message = entry.get("message")
+        if message is None:
+            message = (
+                f'[PX4 bridge] armed={entry["armed"]} fresh={entry["actuators_fresh"]} '
+                f'motors={np.round(entry["motor_controls"], 3).tolist()} '
+                f'thrust={sum(entry["thrust_n"]):.3f} N z={entry["position_enu_m"][2]:.3f} m'
+            )
+        print(message, flush=True)
+
+    def _run(self):
+        while True:
+            with self.condition:
+                self.condition.wait_for(lambda: self.stopping or self.pending is not None)
+                if self.stopping:
+                    return
+                entry, self.pending = self.pending, None
+            try:
+                self._write(entry)
+                error = None
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+            with self.condition:
+                self.error = error
+                self.condition.notify_all()
+
+    def close(self):
+        with self.condition:
+            self.stopping = True
+            self.pending = None
+            self.condition.notify_all()
+        # A blocked disk or console must not hold up bridge shutdown either.
+        self.thread.join(timeout=0.1)
 
 
 class IsaacPX4Bridge:
@@ -141,8 +201,7 @@ class IsaacPX4Bridge:
         self.torque = np.zeros(3)
         self.enabled = False
         self.log_path = self.config_path.parent / "logs" / "isaac_bridge.jsonl"
-        self.log_path.parent.mkdir(exist_ok=True)
-        self.log = self.log_path.open("a", encoding="utf-8", buffering=1)
+        self.log = BridgeLog(self.log_path)
         # This NumPy adapter uses CPU PhysX with readback; RTX sensors can remain enabled.
         SimulationManager.set_device("cpu")
         SimulationManager.set_physics_dt(
@@ -185,14 +244,19 @@ class IsaacPX4Bridge:
             )
         self.model = RotorModel(copy.deepcopy(self.config), float(mass))
         self.mass = float(mass)
-        print(
-            f"[PX4 bridge] Vehicle mass={mass:.4f} kg, k_f={self.model.kf:.8g}, k_m={self.model.km:.8g}.",
-            flush=True,
-        )
-        print(
-            "[PX4 bridge] Motors: "
-            + ", ".join(f'{r["channel"]}={r["name"]}' for r in self.config["rotors"]),
-            flush=True,
+        self.log.submit(
+            dict(
+                sim_time_us=self.time_us,
+                vehicle_mass_kg=mass,
+                k_f=self.model.kf,
+                k_m=self.model.km,
+                message=(
+                    f"[PX4 bridge] Vehicle mass={mass:.4f} kg, "
+                    f"k_f={self.model.kf:.8g}, k_m={self.model.km:.8g}.\n"
+                    "[PX4 bridge] Motors: "
+                    + ", ".join(f'{r["channel"]}={r["name"]}' for r in self.config["rotors"])
+                ),
+            )
         )
 
     def _body_state(self):
@@ -275,12 +339,9 @@ class IsaacPX4Bridge:
                     "actuator_packets": self.transport.received_actuators,
                     "sensor_packets": self.transport.sent_sensors,
                 }
-                self.log.write(json.dumps(entry) + "\n")
-                print(
-                    f'[PX4 bridge] armed={entry["armed"]} fresh={entry["actuators_fresh"]} '
-                    f'motors={np.round(entry["motor_controls"], 3).tolist()} '
-                    f'thrust={sum(entry["thrust_n"]):.3f} N z={position[2]:.3f} m',
-                    flush=True,
+                self.log.submit(entry)
+                self.diagnostics.emit(
+                    "bridge_log_status", error=self.log.error, superseded=self.log.superseded
                 )
                 self.last_log_wall = time.monotonic()
         except Exception as error:

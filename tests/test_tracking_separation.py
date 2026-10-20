@@ -3,7 +3,7 @@
 from collections import deque
 from dataclasses import replace
 import threading
-from types import MethodType
+from types import MethodType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +13,7 @@ from navigation.background import LatestWorker
 from navigation.async_frontiers import AsyncFrontiers
 from navigation.curves import speed_profile
 from navigation.motion import RouteFollower
+from navigation.exploration import ExplorationChoice
 from navigation.prepared_route import PreparedRoute, remaining_safe, route_safe
 from navigation.settings import load_settings
 from navigation.mapping import FREE, UNKNOWN
@@ -33,6 +34,60 @@ class TrackingSeparationTests(unittest.TestCase):
                 )
             )
         return ledger
+
+    def test_frontier_and_reconsideration_jobs_use_the_completed_analysis_map(self):
+        for reconsider in (False, True):
+            with self.subTest(reconsider=reconsider):
+                node, _, _, _ = navigator_fixture()
+                source = node.feed.get()[0]
+                self.analyzed_frontiers(node, source)
+                current = replace(source, stamp=source.stamp + 50_000_000, scans=source.scans + 1)
+                requests = []
+
+                def planning(request):
+                    requests.append(request)
+                    return None
+
+                node.planning = node.replanning = SimpleNamespace(call=planning)
+                with patch("ros2_navigate.time.monotonic", return_value=100.0):
+                    if reconsider:
+                        node.launch_reconsideration(current)
+                        thread = node.reconsider_thread
+                    else:
+                        node.launch_frontier(current)
+                        thread = node.plan_thread
+                    self.assertIsNotNone(thread)
+                    thread.join(2)
+                    self.assertFalse(thread.is_alive())
+                self.assertEqual(len(requests), 1)
+                self.assertIs(requests[0][1]["snap"], source)
+
+    def test_plan_from_lagging_analysis_still_rejects_a_new_current_map_obstacle(self):
+        node, _, _, _ = navigator_fixture()
+        source = node.feed.get()[0]
+        self.analyzed_frontiers(node, source)
+        route = PreparedRoute([[2, 3], [2, 2]], source.model, node.settings)
+        current = replace(
+            source,
+            stamp=source.stamp + 50_000_000,
+            scans=source.scans + 1,
+            body_free=source.body_free.copy(),
+        )
+        current.body_free[current.model.cell([2, 2.5])] = False
+        node.feed.get = lambda: (current, None)
+        choice = ExplorationChoice([2, 2], route, 1.0, 1.0, 1)
+        node.planning = SimpleNamespace(
+            call=lambda request: (request[1]["token"], route, None, choice)
+        )
+        with patch("ros2_navigate.time.monotonic", return_value=100.0):
+            node.launch_frontier(current)
+            self.assertIsNotNone(node.plan_thread)
+            node.plan_thread.join(2)
+            self.assertFalse(node.plan_thread.is_alive())
+            node.pacer.total_s += 0.05
+            GoalNavigator.publish_target(node)
+        self.assertEqual(node.follower.phase, "BLOCKED")
+        self.assertEqual(node.follower.reason, "Map changed during planning")
 
     def test_enclosed_map_completes_before_final_arrival_and_keeps_hover_stream(self):
         for continuous in (False, True):
@@ -307,7 +362,7 @@ class TrackingSeparationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "analysis failed"):
             ledger.observe_map(snapshot())
 
-    def test_frontier_results_require_current_stamp_and_retain_real_resolution_evidence(self):
+    def test_frontier_planning_can_lag_but_completion_requires_current_stamp(self):
         from test_frontier_ledger import maze
 
         ledger = AsyncFrontiers(worker_factory=LatestWorker)
@@ -335,8 +390,10 @@ class TrackingSeparationTests(unittest.TestCase):
             # Each new snapshot is immutable while the worker uses it.
             closed = maze()
             closed.stamp = index
+            closed.scans = index
             closed.model.grid[closed.model.grid == 0] = 2
-            self.assertFalse(ledger.ready_for(closed))
+            self.assertTrue(ledger.ready_for(closed))
+            self.assertIsNone(ledger.completion_for(closed))
             processed(closed)
             if index < 4:
                 self.assertEqual(ledger.report()["resolved"], 0)

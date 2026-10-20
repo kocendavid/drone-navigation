@@ -1,12 +1,14 @@
 """Persistent frontier lifecycle and nearest-route choice through occluded rooms."""
 
-from types import SimpleNamespace
 import math
+import time
 import unittest
+from unittest.mock import patch
 import numpy as np
 from navigation.frontier_ledger import FrontierLedger
 from navigation.exploration import frontiers, choose_frontier, ExplorationSession
 from navigation.mapping import RayMap, FREE, OCCUPIED, UNKNOWN
+from navigation.feed import MapSnapshot
 
 
 def maze():
@@ -18,7 +20,8 @@ def maze():
     model.grid[25:35, 5:10] = UNKNOWN  # Screen-near, flight-far lower frontier.
     model.grid[5:10, 35:45] = UNKNOWN  # Screen-far, flight-near upper frontier.
     clearance, body, safe = model.geometry()
-    return SimpleNamespace(
+    now = time.monotonic()
+    return MapSnapshot(
         model=model,
         clearance=clearance,
         body_free=body,
@@ -26,10 +29,47 @@ def maze():
         valid=True,
         stamp=1,
         pose=[3.1, 3.1, 0, 0],
+        generated=now,
+        cloud_wall=now,
+        clock_wall=now,
+        reason="Live",
+        scans=1,
+        hits=np.empty((0, 2)),
     )
 
 
 class FrontierLedgerTests(unittest.TestCase):
+    def test_active_frontier_does_not_plan_alternatives_that_cannot_win(self):
+        import navigation.exploration as exploration
+
+        snap = maze()
+        ledger = FrontierLedger()
+        ledger.update(snap, frontiers(snap.model.grid))
+        active = max(ledger.records, key=lambda key: ledger.records[key]["boundary_xy"][1])
+        first = choose_frontier(snap, snap.pose[:2], catalog=ledger.snapshot(), active_id=active)
+        with patch.object(exploration, "plan", wraps=exploration.plan) as planner:
+            kept = choose_frontier(
+                snap,
+                snap.pose[:2],
+                catalog=ledger.snapshot(),
+                active_id=active,
+                current_goal=first.goal,
+            )
+        self.assertEqual(kept.goal, first.goal)
+        self.assertEqual(planner.call_count, 1)
+        self.assertEqual([row["id"] for row in kept.frontier_assessments], [active])
+
+    def test_unusable_active_frontier_still_falls_back_to_other_work(self):
+        snap = maze()
+        ledger = FrontierLedger()
+        ledger.update(snap, frontiers(snap.model.grid))
+        active = max(ledger.records, key=lambda key: ledger.records[key]["boundary_xy"][1])
+        for cell in ledger.records[active]["cells"]:
+            snap.model.grid[cell] = OCCUPIED
+        snap.clearance, snap.body_free, snap.safe = snap.model.geometry()
+        choice = choose_frontier(snap, snap.pose[:2], catalog=ledger.snapshot(), active_id=active)
+        self.assertNotEqual(choice.frontier_id, active)
+
     def test_small_boundaries_are_filtered_not_resolved_and_can_grow_eligible(self):
         snap = maze()
         ledger = FrontierLedger()

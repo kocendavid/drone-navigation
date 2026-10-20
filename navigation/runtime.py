@@ -27,10 +27,11 @@ class RuntimeVersion:
                 "config/navigation_settings.json",
             )
         ]
-        native = self.project / "native_control"
-        if native.exists():
-            files += sorted(native.glob("*.cpp")) + sorted(native.glob("*.hpp"))
-            files += [native / "CMakeLists.txt"]
+        for name in ("native_control", "native_navigation"):
+            native = self.project / name
+            if native.exists():
+                files += sorted(native.glob("*.cpp")) + sorted(native.glob("*.hpp"))
+                files += [native / "CMakeLists.txt"]
         digest = hashlib.sha256()
         for path in files:
             digest.update(str(path.relative_to(self.project)).encode())

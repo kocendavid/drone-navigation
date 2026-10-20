@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 from queue import Queue, Full
+import sys
 import threading
 import time
 import uuid
@@ -17,8 +18,90 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def retained_bytes(value):
+    """Conservative retained size, charging shared buffers separately per record."""
+    seen = set()
+
+    def size(item):
+        if id(item) in seen:
+            return 0
+        seen.add(id(item))
+        total = sys.getsizeof(item)
+        if isinstance(item, np.ndarray):
+            # Charge storage even for views; include their retained base as well.
+            # Owned arrays may be double charged, intentionally overestimating.
+            return total + item.nbytes + (size(item.base) if item.base is not None else 0)
+        if isinstance(item, dict):
+            return total + sum(size(k) + size(v) for k, v in item.items())
+        if isinstance(item, (list, tuple, deque, set, frozenset)):
+            return total + sum(size(v) for v in item)
+        if hasattr(item, "__dict__"):
+            return total + size(vars(item))
+        return total
+
+    return size(value)
+
+
+class HistoryQueue(Queue):
+    """FIFO bounded by both record count and conservative retained bytes."""
+
+    def __init__(self, maxsize, max_bytes):
+        if maxsize <= 0 or max_bytes <= 0:
+            raise ValueError("History queue limits must be positive")
+        super().__init__(maxsize)
+        self.max_bytes = max_bytes
+        self.bytes = self.peak_bytes = 0
+
+    def put(self, item, block=True, timeout=None):
+        # Barriers and shutdown retain no map/report data and never cross IPC.
+        weight = 0 if item is None or item[0] == "barrier" else retained_bytes(item)
+        if weight > self.max_bytes:
+            raise Full
+        with self.not_full:
+
+            def full():
+                return self._qsize() >= self.maxsize or self.bytes + weight > self.max_bytes
+
+            if not block:
+                if full():
+                    raise Full
+            elif timeout is None:
+                while full():
+                    self.not_full.wait()
+            elif timeout < 0:
+                raise ValueError("timeout must be non-negative")
+            else:
+                deadline = time.monotonic() + timeout
+                while full():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise Full
+                    self.not_full.wait(remaining)
+            self._put((item, weight))
+            self.bytes += weight
+            self.peak_bytes = max(self.peak_bytes, self.bytes)
+            self.unfinished_tasks += 1
+            self.not_empty.notify()
+
+    def _get(self):
+        item, weight = super()._get()
+        self.bytes -= weight
+        self.not_full.notify_all()
+        return item
+
+    def report(self):
+        with self.mutex:
+            return dict(
+                records=self._qsize(),
+                bytes=self.bytes,
+                peak_bytes=self.peak_bytes,
+                max_records=self.maxsize,
+                max_bytes=self.max_bytes,
+            )
+
+
 class RunHistory:
-    def __init__(self, path=None):
+    def __init__(self, path=None, *, queue_max_records=2048, queue_max_bytes=64 * 1024 * 1024):
         self.run_id = uuid.uuid4().hex
         self.path = Path(path) if path else None
         self.events = deque(maxlen=200)
@@ -28,6 +111,9 @@ class RunHistory:
         self.frame_offsets = OrderedDict()
         self.lock = threading.RLock()
         self.counter_lock = threading.Lock()
+        self.submission_lock = threading.Lock()
+        self.submitted_state = self.submitted_goal = None
+        self.submitted_frame_s = self.submitted_scans = None
         self.sequence = 0
         self.last_state = self.last_goal = self.last_grid = None
         self.last_frame_s = None
@@ -35,7 +121,7 @@ class RunHistory:
         self.error = None
         self.dropped = 0
         self.closed = False
-        self.queue = Queue(maxsize=2048)
+        self.queue = HistoryQueue(queue_max_records, queue_max_bytes)
         self.thread = None
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,18 +162,20 @@ class RunHistory:
 
     def _submit(self, item):
         if self.closed:
-            return
+            return False
         if not self.thread:
             if item[0] == "state":
                 self._observe(*item[1:])
             else:
                 self._event(*item[1:])
-            return
+            return True
         try:
             self.queue.put_nowait(item)
+            return True
         except Full:
             with self.counter_lock:
                 self.dropped += 1
+            return False
 
     def event(self, kind, reason, **data):
         self._submit(("event", kind, reason, data))
@@ -109,9 +197,62 @@ class RunHistory:
             return event
 
     def observe(self, report, snapshot, now):
-        self._submit(("state", dict(report), snapshot, now))
+        # Select before enqueueing: ordinary telemetry must not retain map arrays.
+        # Keep this policy identical for local history and the subprocess writer.
+        with self.submission_lock:
+            phase_reason = report.get("phase"), report.get("reason", "")
+            goal = tuple(report["goal"]) if report.get("goal") is not None else None
+            simulation_s = report.get("delivered_simulation_s", 0.0)
+            changed = phase_reason != self.submitted_state or goal != self.submitted_goal
+            frame = snapshot is not None and (
+                changed
+                or self.submitted_frame_s is None
+                or (
+                    snapshot.scans != self.submitted_scans
+                    and simulation_s - self.submitted_frame_s >= 5.0
+                )
+            )
+            fresh = snapshot is not None and snapshot.fresh(now)
+            telemetry = dict(
+                fresh=fresh,
+                xy=tuple(map(float, snapshot.pose[:2])) if fresh else None,
+                stamp_ns=snapshot.stamp if snapshot is not None else None,
+            )
+            # Full report details belong to frames. Routine records need only
+            # these decision fields and the capture-time pose/freshness above.
+            state = (
+                dict(report)
+                if frame
+                else {
+                    key: report[key]
+                    for key in (
+                        "phase",
+                        "reason",
+                        "goal",
+                        "delivered_simulation_s",
+                        "trajectory_simulation_s",
+                        "speed_decision",
+                        "clearance_m",
+                        "tracking",
+                    )
+                    if key in report
+                }
+            )
+            if not frame and "exploration" in report:
+                exploration = report["exploration"]
+                state["exploration"] = {
+                    key: exploration[key]
+                    for key in ("enabled", "selection_reason")
+                    if key in exploration
+                }
+            accepted = self._submit(("state", state, snapshot if frame else None, telemetry))
+            if accepted:
+                self.submitted_state, self.submitted_goal = phase_reason, goal
+                if frame:
+                    self.submitted_frame_s, self.submitted_scans = simulation_s, snapshot.scans
+            return accepted
 
-    def _observe(self, report, snap, now):
+    def _observe(self, report, snap, telemetry):
         with self.lock:
             simulation_s = report.get("delivered_simulation_s", 0.0)
             phase, reason = report.get("phase"), report.get("reason", "")
@@ -132,19 +273,10 @@ class RunHistory:
                         speed_decision=speed_decision,
                     )
                 )
-            fresh = snap is not None and snap.fresh(now)
-            frame_id = (
-                self.sequence + 1
-                if snap is not None
-                and (
-                    changed
-                    or self.last_frame_s is None
-                    or (snap.scans != self.last_scans and simulation_s - self.last_frame_s >= 5.0)
-                )
-                else None
-            )
+            fresh = telemetry["fresh"]
+            frame_id = self.sequence + 1 if snap is not None else None
             if fresh:
-                xy = list(map(float, snap.pose[:2]))
+                xy = list(telemetry["xy"])
                 if not self.trail or math.dist(xy, self.trail[-1]) >= 0.1:
                     self.trail.append(xy)
                     self._write(
@@ -155,7 +287,7 @@ class RunHistory:
                             simulation_s=simulation_s,
                             source="Isaac capture-time TF",
                             xy=xy,
-                            stamp_ns=snap.stamp,
+                            stamp_ns=telemetry["stamp_ns"],
                         )
                     )
             if frame_id is not None:
@@ -257,13 +389,19 @@ class RunHistory:
                     frame_id=frame_id,
                     clearance_ahead_m=report.get("clearance_m"),
                     speed_decision=speed_decision,
+                    tracking=report.get("tracking"),
                 )
             self.last_state, self.last_goal = (phase, reason), goal
 
     def report(self):
         with self.lock:
             if getattr(self, "remote_report", None) is not None:
-                return dict(self.remote_report, error=self.error, dropped_records=self.dropped)
+                return dict(
+                    self.remote_report,
+                    error=self.error,
+                    dropped_records=self.dropped,
+                    queue=self.queue.report(),
+                )
             return dict(
                 run_id=self.run_id,
                 log_file=str(self.path) if self.path else None,
@@ -285,6 +423,7 @@ class RunHistory:
                 error=self.error,
                 frame_ids=list(self.frame_offsets),
                 dropped_records=self.dropped,
+                queue=self.queue.report(),
             )
 
     def frame(self, frame_id):

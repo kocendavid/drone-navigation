@@ -14,6 +14,8 @@ from rclpy.time import Time
 from tools.forward_clearance import ForwardClearance, stamp_ns, transform_parts
 from lidar_tools.cloud import xyz_array
 from lidar_tools.clearance import health_issue
+from lidar_tools.scan_motion import confirmation_quality
+from lidar_tools.sensor_config import SCAN_EXPOSURE_S
 from navigation.mapping import RayMap
 from navigation.diagnostic_wire import DiagnosticEmitter
 
@@ -33,6 +35,7 @@ class MapWorker(ForwardClearance):
         self.map_error = "Waiting for cloud and transforms"
         self.last_emit = 0.0
         self.last_clock_emit = 0.0
+        self.scan_quality = dict(allowed=False, reason="Waiting for capture-time transform")
         self.diagnostics = DiagnosticEmitter("map_worker")
         super().__init__(args)
 
@@ -110,8 +113,15 @@ class MapWorker(ForwardClearance):
             # an unintended altitude band as navigable space.
             if abs(body_t[2] - (self.args.floor_z + 1.0)) > 0.2:
                 raise ValueError("Mapping expects the existing 1 m hover")
+            self.scan_quality = self.wall_confirmation_quality(msg, wr, wt)
             hits = self.map.update(
-                xyz_array(msg), wr, wt, body_t[:2], body_t[2], self.args.near_range
+                xyz_array(msg),
+                wr,
+                wt,
+                body_t[:2],
+                body_t[2],
+                self.args.near_range,
+                allow_wall_confirmation=self.scan_quality["allowed"],
             )
             self.good = dict(
                 stamp_ns=stamp_ns(msg.header.stamp),
@@ -134,6 +144,40 @@ class MapWorker(ForwardClearance):
             cloud_received_wall_s=arrived,
             processing_duration_s=time.monotonic() - started,
             reason=self.map_error,
+            wall_confirmation=self.scan_quality,
+        )
+
+    def wall_confirmation_quality(self, msg, rotation, translation):
+        """Use exposure duration, rather than the interval between sensor ticks."""
+        if SCAN_EXPOSURE_S == 0:
+            return confirmation_quality(
+                [(rotation, translation)],
+                self.map.resolution,
+                self.map.MAPPING_RANGE_M,
+                exposure_s=0.0,
+            )
+        poses = []
+        capture = Time.from_msg(msg.header.stamp)
+        end = capture.nanoseconds
+        try:
+            for fraction in (1.0, 0.75, 0.5, 0.25):
+                stamp = end - round(SCAN_EXPOSURE_S * fraction * 1e9)
+                if stamp <= 0:
+                    raise ValueError("Scan interval precedes this session")
+                transform = self.buffer.lookup_transform(
+                    "world",
+                    msg.header.frame_id,
+                    Time(nanoseconds=stamp, clock_type=capture.clock_type),
+                )
+                poses.append(transform_parts(transform))
+        except Exception:
+            return dict(allowed=False, reason="Scan-period transforms unavailable")
+        poses.append((rotation, translation))
+        return confirmation_quality(
+            poses,
+            self.map.resolution,
+            self.map.MAPPING_RANGE_M,
+            exposure_s=SCAN_EXPOSURE_S,
         )
 
     def publish_status(self):
@@ -173,6 +217,7 @@ class MapWorker(ForwardClearance):
             grid="".join(np.array(["?", ".", "#", "b"])[self.map.grid.ravel()].tolist()),
             confirmed_walls="".join(np.where(self.map.confirmed_walls.ravel(), "1", "0").tolist()),
             wall_policy=self.map.wall_policy(),
+            wall_confirmation=self.scan_quality,
             pose=good["pose"] if good else None,
             hits=np.round(good["hits"], 4).tolist() if good else [],
             near_range_m=self.args.near_range,

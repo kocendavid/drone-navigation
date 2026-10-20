@@ -62,7 +62,10 @@ def speed_profile(path, acceleration, cruise):
     for i in range(len(path) - 2, -1, -1):
         distance = np.linalg.norm(path[i + 1] - path[i])
         limits[i] = min(
-            limits[i], math.sqrt(limits[i + 1] ** 2 + 2 * 0.6 * acceleration * distance)
+            limits[i],
+            math.sqrt(
+                limits[i + 1] ** 2 + 2 * LATERAL_ACCELERATION_SHARE * acceleration * distance
+            ),
         )
     return limits
 

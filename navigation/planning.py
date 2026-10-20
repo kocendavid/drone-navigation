@@ -30,6 +30,16 @@ def segment_safe(mask, a, b):
 
 
 def astar(mask, start, goal, traversal_cost=None):
+    from .native_planning import native_planning
+
+    native = native_planning()
+    if native is not None:
+        return native.astar(mask, start, goal, traversal_cost)
+    return astar_python(mask, start, goal, traversal_cost)
+
+
+def astar_python(mask, start, goal, traversal_cost=None):
+    """Reference search, also used when no native build is installed."""
     if traversal_cost is not None and (
         traversal_cost.shape != mask.shape
         or not np.isfinite(traversal_cost[mask]).all()

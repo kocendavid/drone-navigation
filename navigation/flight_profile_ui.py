@@ -2,7 +2,6 @@
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import csv
-import io
 import json
 import math
 from pathlib import Path
@@ -11,18 +10,123 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 
+class ProfileTail:
+    """Parse only complete appended CSV records; keep partial records for retry."""
+
+    def __init__(self):
+        self.signature = None
+        self.identity = None
+        self.rows = []
+        self.headers = None
+        self.offset = 0
+        self.anchor = b""
+        self.epoch = 0
+        self.navigation_available = False
+        self.bytes_read = 0
+
+    def reset(self, identity):
+        self.identity = identity
+        self.rows = []
+        self.headers = None
+        self.offset = 0
+        self.anchor = b""
+        self.epoch += 1
+        self.navigation_available = False
+
+    @staticmethod
+    def values(headers, fields):
+        result = {}
+        for index, key in enumerate(headers):
+            value = fields[index] if index < len(fields) else None
+            if key in ("phase", "reason", "speed_limit"):
+                result[key] = value
+            elif value in ("True", "False"):
+                result[key] = value == "True"
+            else:
+                try:
+                    number = float(value)
+                    result[key] = number if math.isfinite(number) else None
+                except (ValueError, TypeError):
+                    result[key] = None
+        return result
+
+    def update(self, path):
+        if path is None:
+            if self.identity is not None:
+                self.reset(None)
+                self.signature = None
+            return
+        stat = path.stat()
+        signature = (str(path), stat.st_size, stat.st_mtime_ns)
+        if signature == self.signature:
+            return
+        identity = (str(path), stat.st_dev, stat.st_ino)
+        with path.open("rb") as stream:
+            replaced = identity != self.identity or stat.st_size < self.offset
+            if not replaced and self.signature is not None:
+                replaced = stat.st_size <= self.signature[1]
+                if not replaced and self.anchor:
+                    stream.seek(self.offset - len(self.anchor))
+                    anchor = stream.read(len(self.anchor))
+                    self.bytes_read += len(anchor)
+                    replaced = anchor != self.anchor
+            if replaced:
+                self.reset(identity)
+            begin = self.offset
+            stream.seek(begin)
+            content = stream.read(max(0, stat.st_size - begin))
+            self.bytes_read += len(content)
+            lines = content.splitlines(keepends=True)
+            if lines and not lines[-1].endswith(b"\n"):
+                lines.pop()
+            ends, position = [], begin
+            for line in lines:
+                position += len(line)
+                ends.append(position)
+            reader = csv.reader((line.decode("utf-8") for line in lines), strict=True)
+            try:
+                for fields in reader:
+                    if self.headers is None:
+                        self.headers = fields
+                    elif fields:
+                        row = self.values(self.headers, fields)
+                        if row.get("simulation_s") is not None:
+                            self.rows.append(row)
+                            self.navigation_available |= row.get("phase") in (
+                                "NAVIGATING",
+                                "PLANNING",
+                                "SETTLING",
+                            )
+                    self.offset = ends[reader.line_num - 1]
+            except csv.Error:
+                # A quoted multi-line record can end mid-write. Retry only
+                # that unfinished record when the file grows again.
+                pass
+            stream.seek(max(0, self.offset - 64))
+            self.anchor = stream.read(min(64, self.offset))
+            self.bytes_read += len(self.anchor)
+        self.signature = signature
+
+
 class ProfileServer:
-    def __init__(self, folder, port=8788):
+    def __init__(self, folder, port=8788, status_path=None):
         root = Path(folder).resolve()
         stopped = threading.Event()
         cache_lock = threading.Lock()
-        cached_signature, cached_rows = None, []
+        cache = ProfileTail()
+        status_path = Path(status_path) if status_path else root / "status.json"
 
         def current():
             try:
-                path = root / "status.json"
+                path = status_path
                 status = json.loads(path.read_text(encoding="utf-8"))
                 status["updated_unix_s"] = status.get("updated_unix_s", path.stat().st_mtime)
+                if "flight_profile" in status:
+                    status = dict(
+                        status["flight_profile"],
+                        recording=status.get("recording", False),
+                        updated_unix_s=status["updated_unix_s"],
+                    )
                 return status
             except (OSError, ValueError, TypeError):
                 return {}
@@ -51,59 +155,38 @@ class ProfileServer:
                 return path
             return None
 
-        def snapshot():
-            nonlocal cached_signature, cached_rows
+        def snapshot(cursor=None, include_samples=True):
             status = current()
             path = asset(status, "csv")
             with cache_lock:
                 try:
-                    stat = path.stat() if path else None
-                    signature = (str(path), stat.st_size, stat.st_mtime_ns) if stat else None
-                    if signature != cached_signature:
-                        rows = []
-                        if path:
-                            # Read a fixed snapshot; ignore an unfinished append at EOF.
-                            with path.open("rb") as stream:
-                                content = stream.read(stat.st_size)
-                            content = content[: content.rfind(b"\n") + 1].decode("utf-8")
-                            for row in csv.DictReader(io.StringIO(content)):
-                                values = {}
-                                for key, value in row.items():
-                                    if key in ("phase", "reason", "speed_limit"):
-                                        values[key] = value
-                                    elif value in ("True", "False"):
-                                        values[key] = value == "True"
-                                    else:
-                                        try:
-                                            number = float(value)
-                                            values[key] = number if math.isfinite(number) else None
-                                        except (ValueError, TypeError):
-                                            values[key] = None
-                                if values.get("simulation_s") is not None:
-                                    rows.append(values)
-                        cached_signature, cached_rows = signature, rows
+                    cache.update(path)
                 except (OSError, UnicodeError, csv.Error):
-                    # Keep the previous snapshot while an atomic replacement is in progress.
-                    pass
-                rows = cached_rows
-                version = str(cached_signature)
-            live = (
-                bool(status.get("recording"))
-                and 0 <= time.time() - status.get("updated_unix_s", 0) <= 20
-            )
-            return dict(
-                available=bool(rows),
-                navigation_available=any(
-                    r.get("phase") in ("NAVIGATING", "PLANNING", "SETTLING") for r in rows
-                ),
-                csv_available=path is not None,
-                live=live,
-                updated_unix_s=status.get("updated_unix_s"),
-                simulation_s=rows[-1]["simulation_s"] if rows else None,
-                run=str(path) if path else None,
-                version=version,
-                samples=rows,
-            )
+                    pass  # Keep the last complete records while a writer replaces the file.
+                count = len(cache.rows)
+                reset = cursor is None or cursor[0] != cache.epoch or cursor[1] > count
+                offset = 0 if reset else cursor[1]
+                latest = cache.rows[-1] if count else {}
+                live = bool(status.get("recording")) and (
+                    0 <= time.time() - status.get("updated_unix_s", 0) <= 20
+                )
+                return dict(
+                    available=bool(count),
+                    navigation_available=cache.navigation_available,
+                    csv_available=path is not None,
+                    live=live,
+                    updated_unix_s=status.get("updated_unix_s"),
+                    simulation_s=latest.get("simulation_s"),
+                    timestamp_unix_s=latest.get("timestamp_unix_s"),
+                    run=str(path) if path else None,
+                    version=f"{cache.epoch}:{count}",
+                    epoch=cache.epoch,
+                    reset=reset,
+                    offset=offset,
+                    total_samples=count,
+                    samples=list(cache.rows[offset:]) if include_samples else [],
+                    error=status.get("error"),
+                )
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -137,7 +220,7 @@ class ProfileServer:
                     )
                     self.payload(200, html, "text/html; charset=utf-8")
                 elif request.path == "/api/profile":
-                    data = snapshot()
+                    data = snapshot(include_samples=False)
                     data.pop("samples")
                     self.payload(200, data)
                 elif request.path == "/api/samples":
@@ -148,16 +231,17 @@ class ProfileServer:
                     self.send_header("Cache-Control", "no-store")
                     self.send_header("X-Accel-Buffering", "no")
                     self.end_headers()
-                    previous = None
+                    previous, cursor = None, None
                     try:
                         while not stopped.is_set():
-                            data = snapshot()
+                            data = snapshot(cursor)
                             version = (data["version"], data["live"], data["updated_unix_s"])
                             if version != previous:
                                 body = json.dumps(data, allow_nan=False)
                                 self.wfile.write(f"event: profile\ndata: {body}\n\n".encode())
                                 self.wfile.flush()
                                 previous = version
+                                cursor = (data["epoch"], data["total_samples"])
                             stopped.wait(0.2)
                     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                         pass
@@ -201,6 +285,7 @@ class ProfileServer:
                 else:
                     self.payload(404, dict(error="Not found"))
 
+        self.profile_cache = cache
         self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.stopped = stopped
         self.server.daemon_threads = True

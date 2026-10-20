@@ -192,6 +192,7 @@ def main():
                     recording=True,
                     pid=os.getpid(),
                     updated_wall_s=now,
+                    updated_unix_s=time.time(),
                     log_file=str(folder / "events.jsonl"),
                     stream_counts=dict(counts),
                     dropped_records=dropped[0],
@@ -219,7 +220,16 @@ def main():
             process.terminate()
         log.close()
         profile.finish()
-        status.update(recording=False, updated_wall_s=time.perf_counter())
+        status.update(
+            recording=False,
+            updated_wall_s=time.perf_counter(),
+            updated_unix_s=time.time(),
+            flight_profile=dict(
+                csv=str(profile.files[-1]) if profile.files else None,
+                samples=profile.samples,
+                error=profile_error,
+            ),
+        )
         atomic_json(status_path, status, busy_ok=True)
 
 

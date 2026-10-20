@@ -3,7 +3,7 @@
 import math
 import numpy as np
 from .settings import NavigationSettings
-from .curves import speed_profile, corner_geometry
+from .curves import speed_profile, corner_geometry, LATERAL_ACCELERATION_SHARE
 from .braking import stopping_envelope
 
 
@@ -324,6 +324,12 @@ class RouteFollower:
         braking_safe=None,
         tracking_reference=None,
     ):
+        """Track a route; certified handovers require measured velocity and space.
+
+        Calls without motion feedback can evaluate straight reference geometry.
+        They pause if a maneuver needs braking, rather than using a different
+        turn controller or inventing physical velocity/clearance measurements.
+        """
         if self.phase != "NAVIGATING":
             return
         if not math.isfinite(dt) or not 0 <= dt <= 0.5:
@@ -394,7 +400,13 @@ class RouteFollower:
         # Live handovers have a measured velocity vector and a complete stopping
         # envelope checker. Decide to brake BEFORE the scalar tracking latch or
         # the target-lead clamp can turn a feasible deceleration into a pause.
-        if measured_velocity is not None and braking_safe is not None:
+        live_tracking = measured_velocity is not None and braking_safe is not None
+        if (measured_velocity is None) != (braking_safe is None):
+            self.hold(
+                pose, "Braking requires measured velocity and a stopping-space check", "PAUSED"
+            )
+            return
+        if live_tracking:
             measured_velocity = np.asarray(measured_velocity, dtype=float)
             if measured_velocity.shape != (2,) or not np.isfinite(measured_velocity).all():
                 self.hold(pose, "Measured velocity unavailable for braking", "PAUSED")
@@ -412,6 +424,19 @@ class RouteFollower:
                 if self.braking_envelope is None:
                     self.braking_cause = "travel_direction_change" if major else "tracking_error"
                 self.braking_tick(dt, pose, measured_velocity, hits, braking_safe, heading_error)
+                return
+        else:
+            vector = self.path[self.index] - self.target
+            length = float(np.linalg.norm(vector))
+            speed = float(np.linalg.norm(self.velocity))
+            if self.braking_envelope is not None or (
+                speed > 0.15 and length > 1e-8 and self.velocity @ (vector / length) < 0.7 * speed
+            ):
+                self.hold(
+                    pose,
+                    "Route handover requires measured velocity and certified stopping space",
+                    "PAUSED",
+                )
                 return
         if tracking_error > 0.35:
             self.hold(pose, "Trajectory tracking error exceeded 0.35 m", "PAUSED")
@@ -482,7 +507,10 @@ class RouteFollower:
         else:
             cap = self._speed_cap(
                 "route_profile",
-                math.sqrt(exit_speed**2 + 2 * 0.6 * cfg.acceleration_m_s2 * remaining),
+                math.sqrt(
+                    exit_speed**2
+                    + 2 * LATERAL_ACCELERATION_SHARE * cfg.acceleration_m_s2 * remaining
+                ),
                 cap,
             )
         if self.index < len(self.path) - 1 and exit_speed <= cfg.turn_speed_m_s:
@@ -505,7 +533,6 @@ class RouteFollower:
         predicted_offset = predicted - np.asarray(pose)
         predicted_along = float(predicted_offset @ direction)
         predicted_cross = math.sqrt(max(0.0, tracking_error**2 - predicted_along**2))
-        live_tracking = measured_velocity is not None and braking_safe is not None
         # With a velocity measurement, govern forward lead by relative motion
         # below. Scaling cruise alone can leave its ceiling ABOVE the reference
         # speed, allowing continued acceleration while the lead grows.
@@ -566,26 +593,8 @@ class RouteFollower:
         if not math.isfinite(actual_speed) or actual_speed < 0:
             self.hold(pose, "Measured speed unavailable for turn coordination", "PAUSED")
             return
-        major_change = (
-            previous_speed > 0.15 and float(self.velocity @ direction) < 0.7 * previous_speed
-        )
-        if self.turn_stage is None and major_change:
-            self.turn_stage = "BRAKING"
-        if self.turn_stage in ("BRAKING", "ALIGNING") and max(previous_speed, actual_speed) <= 0.15:
-            self.turn_stage = None
-        turning = self.turn_stage is not None
-        self.tracking.update(turn_stage=self.turn_stage, measured_speed_m_s=actual_speed)
-        if turning:
-            old_clearance = clearance_ahead(pose, self.velocity, hits)
-            if old_clearance is not None and old_clearance <= cfg.stop_distance_m:
-                self.hold(pose, "Obstacle inside stop distance along braking direction", "BLOCKED")
-                return
-            # Brake along the previous velocity instead of preserving its
-            # magnitude while instantly pointing it at a different destination.
-            desired_velocity = np.zeros(2)
-            self._speed_cap("travel_direction_change", 0.0, cap)
-        else:
-            desired_velocity = direction * cap
+        self.tracking.update(turn_stage=None, measured_speed_m_s=actual_speed)
+        desired_velocity = direction * cap
         self.speed_decision["selected_speed_m_s"] = float(np.linalg.norm(desired_velocity))
         if measured_speed is not None:
             self.speed_decision["current_speed_m_s"] = float(actual_speed)
@@ -610,7 +619,7 @@ class RouteFollower:
             if sideways_squared <= cfg.target_lead_m**2
             else 0.0
         )
-        if measured_velocity is not None and braking_safe is not None:
+        if live_tracking:
             preview = stopping_envelope(
                 self.target + velocity * dt,
                 velocity,
@@ -645,16 +654,12 @@ class RouteFollower:
             self.velocity = travel_direction * self.speed
         self.target = candidate
         self.reason = (
-            "Braking to near-hover for route change"
-            if self.turn_stage == "BRAKING"
+            "Speed capped while yaw aligns with route"
+            if yaw_limited
             else (
-                "Speed capped while yaw aligns with route"
-                if yaw_limited
-                else (
-                    "Slowing for tracking lag"
-                    if effective_tracking_scale < 0.999
-                    else "Following planned route"
-                )
+                "Slowing for tracking lag"
+                if effective_tracking_scale < 0.999
+                else "Following planned route"
             )
         )
         if self.index == len(self.path) - 1 and np.linalg.norm(self.target - self.goal) < 0.015:
@@ -665,9 +670,7 @@ class RouteFollower:
             self.velocity = np.zeros(2)
             self._speed_cap("goal_reached", 0.0, cap)
             self.speed_decision["selected_speed_m_s"] = 0.0
-        self._finish_speed_decision(
-            "settling" if self.phase == "SETTLING" else "braking" if turning else "following"
-        )
+        self._finish_speed_decision("settling" if self.phase == "SETTLING" else "following")
 
     def remaining_path(self, pose):
         if self.braking_envelope is not None:

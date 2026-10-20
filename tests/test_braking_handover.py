@@ -14,6 +14,17 @@ from navigation.settings import load_settings
 
 
 class BrakingHandoverTests(unittest.TestCase):
+    def test_missing_or_partial_braking_feedback_pauses_instead_of_using_another_controller(self):
+        for feedback in ({}, {"measured_velocity": [0.6, 0]}, {"braking_safe": lambda _: True}):
+            with self.subTest(feedback=list(feedback)):
+                follower = self.moving(0.6)
+                follower.retarget([[0, 0], [-20, 0]])
+                follower.tick(0.05, [0, 0], np.empty((0, 2)), **feedback)
+                self.assertEqual(follower.phase, "PAUSED")
+                self.assertIn("measured velocity", follower.reason)
+                self.assertIsNone(follower.braking_envelope)
+                np.testing.assert_array_equal(follower.velocity, [0, 0])
+
     def tick(self, follower, dt, pose, velocity, **kwargs):
         follower.tick(
             dt,

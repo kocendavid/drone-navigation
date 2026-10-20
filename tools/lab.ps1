@@ -117,7 +117,7 @@ foreach ($name in $labServices) {
     $err = Join-Path $labLogs "lab_${name}_${stamp}.err.log"
     switch ($name) {
         'diagnostics' { $exe = 'python.exe'; $arguments = "`"$PSScriptRoot\record_timing.py`"" }
-        'profile' { $exe = 'python.exe'; $arguments = "`"$PSScriptRoot\record_flight_profile.py`" --latest-run --follow" }
+        'profile' { $exe = 'python.exe'; $arguments = "`"$PSScriptRoot\record_flight_profile.py`" --follow" }
         'agent' { $exe = 'pixi.exe'; $arguments = "run --manifest-path `"$labManifest`" C:\px4-tools\agent-v2.4.3\bin\MicroXRCEAgent.exe udp4 -p 8888" }
         'zenoh' { $exe = 'pixi.exe'; $arguments = "run --manifest-path `"$labManifest`" ros2 run rmw_zenoh_cpp rmw_zenohd" }
         'mount' { $exe = 'pixi.exe'; $arguments = "run --manifest-path `"$labManifest`" cmd /d /c `"$PSScriptRoot\lidar_mount_tf.cmd`"" }

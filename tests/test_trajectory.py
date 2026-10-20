@@ -42,9 +42,14 @@ class TrajectoryTests(unittest.TestCase):
                 observed_corridor=True,
                 heading_error=0.0,  # Yaw can align before physical braking finishes.
                 measured_speed=0.6,
+                measured_velocity=[0.6, 0],
+                braking_safe=lambda points: True,
             )
             self.assertLessEqual(np.linalg.norm(follower.velocity - before), 0.0125 + 1e-8)
-            self.assertEqual(follower.turn_stage, "BRAKING")
+            self.assertEqual(follower.phase, "NAVIGATING")
+            self.assertEqual(
+                follower.turn_stage, "BRAKING" if follower.speed > 1e-8 else "SETTLING"
+            )
             yaw, rate = smooth_yaw(
                 yaw,
                 rate,
@@ -58,7 +63,7 @@ class TrajectoryTests(unittest.TestCase):
         np.testing.assert_allclose(follower.velocity, [0, 0], atol=1e-9)
         # A new frontier update must not bypass an unfinished braking stage.
         follower.retarget([follower.target.tolist(), [0, 25]])
-        self.assertEqual(follower.turn_stage, "BRAKING")
+        self.assertEqual(follower.turn_stage, "SETTLING")
         target = follower.target.copy()
         follower.tick(
             0.05,
@@ -67,6 +72,22 @@ class TrajectoryTests(unittest.TestCase):
             observed_corridor=True,
             heading_error=math.radians(70),
             measured_speed=0.05,
+            measured_velocity=[0.05, 0],
+            braking_safe=lambda points: True,
+        )
+        self.assertEqual(follower.phase, "PLANNING")
+        np.testing.assert_array_equal(follower.target, target)
+        # The new route must be planned from the stopped reference, rather than
+        # joining the old provisional route after braking.
+        follower.begin([target.tolist(), [target[0], 25]])
+        follower.tick(
+            0.05,
+            target,
+            np.empty((0, 2)),
+            observed_corridor=True,
+            heading_error=math.radians(70),
+            measured_velocity=[0, 0],
+            braking_safe=lambda points: True,
         )
         self.assertIsNone(follower.turn_stage)
         self.assertGreater(np.linalg.norm(follower.target - target), 0)
@@ -78,6 +99,8 @@ class TrajectoryTests(unittest.TestCase):
             observed_corridor=True,
             heading_error=math.radians(25),
             measured_speed=0.05,
+            measured_velocity=[0.05, 0],
+            braking_safe=lambda points: True,
         )
         self.assertIsNone(follower.turn_stage)
         self.assertGreater(follower.speed, 0)

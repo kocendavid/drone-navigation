@@ -1,10 +1,12 @@
 """Frontier geometry and ledger mutation stay off the flight callback."""
 
 import threading
+import time
 
 from .process_worker import ProcessLatestWorker
 from .frontier_ledger import FrontierLedger
 from .mission import assess_completion
+from .prepared_route import geometry_key
 
 
 class FrontierAnalyzer:
@@ -67,9 +69,31 @@ class AsyncFrontiers:
         view = self._view()
         return view is not None and view["valid"]
 
-    def ready_for(self, snapshot):
-        latest, failure = self.worker.latest()
-        return bool(not failure and latest and latest[0] == snapshot.stamp and latest[1]["valid"])
+    def planning_view(self, snapshot, now=None):
+        """Pair a fresh completed catalog with the exact map that produced it.
+
+        Requiring the newest stamp starves planning when analysis is slower
+        than map publication. Flight still validates plans against its newest
+        map; completion evidence below deliberately retains its exact stamp.
+        """
+        latest, failure, source = self.worker.latest_with_input()
+        if self.worker.stopping or failure or latest is None or not latest[1]["valid"]:
+            return None
+        analyzed = source[0]
+        now = time.monotonic() if now is None else now
+        if not (
+            latest[0] == analyzed.stamp
+            and snapshot.fresh(now)
+            and analyzed.fresh(now)
+            and analyzed.stamp <= snapshot.stamp
+            and analyzed.scans <= snapshot.scans
+            and geometry_key(analyzed.model) == geometry_key(snapshot.model)
+        ):
+            return None
+        return analyzed, [dict(row) for row in latest[1]["catalog"]], latest[1]["active_id"]
+
+    def ready_for(self, snapshot, now=None):
+        return self.planning_view(snapshot, now) is not None
 
     def completion_for(self, snapshot):
         latest, failure = self.worker.latest()

@@ -496,18 +496,22 @@ class GoalNavigator(HoverPublisher):
         self.plan_thread.start()
 
     def launch_frontier(self, snap):
-        ledger = self.exploration.frontier_ledger
-        if hasattr(ledger, "ready_for") and not ledger.ready_for(snap):
-            return
         if self.plan_thread is not None and self.plan_thread.is_alive():
+            return
+        ledger = self.exploration.frontier_ledger
+        context = (
+            ledger.planning_view(snap)
+            if hasattr(ledger, "planning_view")
+            else (snap, ledger.snapshot(), ledger.active_id)
+        )
+        if context is None:
             return
         self.plan_generation += 1
         token = self.plan_generation
         start = self.world_pose.copy()
         visited = list(self.exploration.visited)
         trail = list(self.exploration.trail)
-        catalog = self.exploration.frontier_ledger.snapshot()
-        active_id = self.exploration.frontier_ledger.active_id
+        planning_snap, catalog, active_id = context
         mission_requested = self.mission.enabled
         self.target_goal = None
         self.follower.hold(start, "Selecting frontier viewpoint", "PLANNING")
@@ -516,7 +520,7 @@ class GoalNavigator(HoverPublisher):
             "frontier",
             dict(
                 token=token,
-                snap=snap,
+                snap=planning_snap,
                 settings=self.settings,
                 start=start,
                 visited=visited,
@@ -561,17 +565,21 @@ class GoalNavigator(HoverPublisher):
 
     def launch_reconsideration(self, snap):
         """Evaluate a new map while the existing control stream keeps running."""
-        ledger = self.exploration.frontier_ledger
-        if hasattr(ledger, "ready_for") and not ledger.ready_for(snap):
-            return
         if self.reconsider_thread is not None and self.reconsider_thread.is_alive():
+            return
+        ledger = self.exploration.frontier_ledger
+        context = (
+            ledger.planning_view(snap)
+            if hasattr(ledger, "planning_view")
+            else (snap, ledger.snapshot(), ledger.active_id)
+        )
+        if context is None:
             return
         token = self.plan_generation
         current = self.target_goal.copy()
         visited = list(self.exploration.visited)
         trail = list(self.exploration.trail)
-        catalog = self.exploration.frontier_ledger.snapshot()
-        active_id = self.exploration.frontier_ledger.active_id
+        planning_snap, catalog, active_id = context
         self.reconsider_mark = self.pacer.total_s
         self.reconsider_stamp = snap.stamp
         self.exploration.reconsiderations += 1
@@ -585,7 +593,7 @@ class GoalNavigator(HoverPublisher):
             "reconsider",
             dict(
                 token=token,
-                snap=snap,
+                snap=planning_snap,
                 settings=self.settings,
                 current=current,
                 visited=visited,

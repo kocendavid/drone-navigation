@@ -424,6 +424,7 @@ class MotionTests(unittest.TestCase):
         follower.begin([[0, 0], [100, 0]])
         actual, physical_velocity = np.zeros(2), np.zeros(2)
         switched = False
+        replanned = False
         minimum_forward_speed = math.inf
         for i in range(300):
             if not switched and follower.speed >= 0.6:
@@ -439,8 +440,10 @@ class MotionTests(unittest.TestCase):
                 np.array([[100, 0], [-100, 0]]),
                 observed_corridor=True,
                 motion_safe=lambda a, b: True,
+                measured_velocity=physical_velocity,
+                braking_safe=lambda points: True,
             )
-            self.assertEqual(follower.phase, "NAVIGATING")
+            self.assertIn(follower.phase, ("NAVIGATING", "PLANNING"))
             self.assertLessEqual(
                 np.linalg.norm(follower.velocity - previous_velocity), 0.25 * 0.05 + 1e-8
             )
@@ -448,9 +451,14 @@ class MotionTests(unittest.TestCase):
             desired = feedforward + 0.95 * (follower.target - actual)
             physical_velocity += np.clip((desired - physical_velocity) * 0.05 / 0.15, -0.15, 0.15)
             actual += physical_velocity * 0.05
+            if follower.phase == "PLANNING":
+                self.assertLessEqual(np.linalg.norm(physical_velocity), 0.15)
+                follower.begin([actual.tolist(), (actual + [-20, 2]).tolist()])
+                replanned = True
             if switched:
                 minimum_forward_speed = min(minimum_forward_speed, follower.velocity[0])
         self.assertTrue(switched)
+        self.assertTrue(replanned)
         self.assertLess(minimum_forward_speed, -0.5)
 
     def test_turn_braking_cannot_enter_unobserved_cells_or_ignore_close_old_direction(self):
@@ -461,7 +469,14 @@ class MotionTests(unittest.TestCase):
             follower.speed = 0.6
             follower.retarget([[0, 0], [-10, 0]])
             hits = np.array([[0.6 if close_obstacle else 10, 0], [-10, 0]])
-            follower.tick(0.05, [0, 0], hits, motion_safe=lambda a, b: close_obstacle)
+            follower.tick(
+                0.05,
+                [0, 0],
+                hits,
+                motion_safe=lambda a, b: close_obstacle,
+                measured_velocity=[0.6, 0],
+                braking_safe=lambda points: close_obstacle,
+            )
             self.assertEqual(follower.phase, "BLOCKED")
             np.testing.assert_array_equal(follower.target, [0, 0])
             np.testing.assert_array_equal(follower.velocity, [0, 0])
@@ -1890,6 +1905,80 @@ class MapFeedTests(unittest.TestCase):
 
 
 class DashboardTests(unittest.TestCase):
+    def test_blocked_route_preview_does_not_block_state_or_command_acknowledgement(self):
+        snap = snapshot()
+        commands = Queue()
+        hub = Dashboard(SimpleNamespace(get=lambda: (snap, None)), commands, port=0)
+        self.addCleanup(hub.close)
+        started, release = threading.Event(), threading.Event()
+        original = hub.preview_planning.call
+        errors = []
+
+        def blocked(item):
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError("Test did not release preview")
+            return original(item)
+
+        def preview():
+            try:
+                hub.plan_destination([2.0, 2.0])
+            except Exception as exc:
+                errors.append(exc)
+
+        with (
+            patch.object(hub.preview_planning, "call", side_effect=blocked),
+            patch("navigation.dashboard.time.monotonic", return_value=100.0),
+        ):
+            thread = threading.Thread(target=preview)
+            thread.start()
+            try:
+                self.assertTrue(started.wait(2))
+                with urlopen(hub.url + "/api/state", timeout=2) as response:
+                    self.assertTrue(json.load(response)["map_fresh"])
+                request = Request(
+                    hub.url + "/api/command",
+                    json.dumps(dict(action="hold")).encode(),
+                    headers={"Content-Type": "application/json", "X-Navigation-Token": hub.token},
+                )
+                # Even a stalled presentation service cannot own this small reply.
+                with patch.object(
+                    hub.presentation,
+                    "call",
+                    side_effect=AssertionError("queued behind presentation"),
+                ):
+                    with urlopen(request, timeout=2) as response:
+                        self.assertEqual(json.load(response)["command"]["status"], "queued")
+                self.assertEqual(commands.get_nowait()["action"], "hold")
+                self.assertTrue(thread.is_alive())
+            finally:
+                release.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_map_display_reuses_centerline_without_constructing_routing_costs(self):
+        from navigation.report_jobs import PresentationJobs
+
+        snap = snapshot()
+        centerline = np.zeros(snap.safe.shape, dtype=bool)
+        centerline[40, 40] = True
+        with patch(
+            "navigation.centering.routing_geometry", side_effect=AssertionError("routing cost")
+        ):
+            snap.centerline = centerline
+            with patch(
+                "navigation.centering.center_geometry",
+                side_effect=AssertionError("cached geometry"),
+            ):
+                self.assertEqual(PresentationJobs()(("map", snap))["centerline"].count("1"), 1)
+            snap.centerline = None
+            with patch(
+                "navigation.centering.center_geometry", return_value=(snap.clearance, centerline)
+            ) as geometry:
+                self.assertEqual(PresentationJobs()(("map", snap))["centerline"].count("1"), 1)
+                geometry.assert_called_once()
+
     def test_dashboard_reports_rectangular_dimensions(self):
         snap = snapshot()
         snap.model = RayMap(**load_settings().map_options())

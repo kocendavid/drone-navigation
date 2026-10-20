@@ -40,10 +40,12 @@ class PresentationJobs:
             return plan(snap, snap.pose[:2], point)
         if kind == "map":
             import numpy as np
-            from .centering import routing_geometry
+            from .centering import center_geometry
 
             snap = value
-            _, centerline, _ = routing_geometry(snap)
+            centerline = snap.centerline
+            if centerline is None:
+                _, centerline = center_geometry(snap.model, snap.clearance, snap.safe)
             return dict(
                 size=snap.model.grid.shape[1],
                 width=snap.model.grid.shape[1],

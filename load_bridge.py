@@ -10,6 +10,10 @@ for directory in (PROJECT, PROJECT / ".vendor"):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
+# Sensor output compensation is latched when rendering starts. Apply it before
+# closing/replacing the bridge, so an accidental in-flight reload fails first.
+runpy.run_path(str(PROJECT / "tools" / "configure_navigation_lidar.py"))
+
 previous = getattr(builtins, "_px4_isaac_bridge", None)
 if previous is not None:
     previous.close()

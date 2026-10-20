@@ -8,7 +8,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from navigation.flight_profile_ui import ProfileServer
+from navigation.flight_profile_ui import ProfileServer, ProfileTail
 
 
 class FlightProfileUITests(unittest.TestCase):
@@ -97,9 +97,18 @@ class FlightProfileUITests(unittest.TestCase):
             with csv.open("a", encoding="utf-8") as output:
                 output.write("2,0.8\n")
             second = event(stream)
-            self.assertEqual(second["samples"][-1]["simulation_s"], 2)
+            self.assertEqual([row["simulation_s"] for row in second["samples"]], [2])
+            self.assertFalse(second["reset"])
+            self.assertEqual(second["offset"], 1)
             self.assertNotEqual(first["version"], second["version"])
             self.assertLess(time.monotonic() - began, 2)
+            bytes_read = self.server.profile_cache.bytes_read
+            self.status(csv=str(csv), recording=True, updated_unix_s=time.time())
+            heartbeat = event(stream)
+            self.assertEqual(heartbeat["samples"], [])
+            self.assertEqual(heartbeat["offset"], 2)
+            self.assertEqual(heartbeat["version"], second["version"])
+            self.assertEqual(self.server.profile_cache.bytes_read, bytes_read)
             reset = self.folder / "reset.csv"
             reset.write_text("simulation_s,actual_speed_m_s\n0,0.0\n", encoding="utf-8")
             self.status(csv=str(reset), recording=False)
@@ -107,6 +116,67 @@ class FlightProfileUITests(unittest.TestCase):
             self.assertNotEqual(second["run"], third["run"])
             self.assertEqual(len(third["samples"]), 1)
             self.assertFalse(third["live"])
+            self.assertTrue(third["reset"])
+
+    def test_tail_reads_only_appends_and_retries_incomplete_unicode_multiline_records(self):
+        csv = self.folder / "large.csv"
+        csv.write_text(
+            "simulation_s,reason\n" + "".join(f"{i},ok\n" for i in range(2000)), encoding="utf-8"
+        )
+        tail = ProfileTail()
+        tail.update(csv)
+        initial_bytes = tail.bytes_read
+        tail.update(csv)
+        self.assertEqual(tail.bytes_read, initial_bytes)
+        with csv.open("ab") as output:
+            output.write('2000,"zatáčka\n'.encode("utf-8"))
+        tail.update(csv)
+        self.assertEqual(len(tail.rows), 2000)
+        with csv.open("ab") as output:
+            output.write('dokončena"\n'.encode("utf-8"))
+        tail.update(csv)
+        self.assertEqual(tail.rows[-1]["reason"], "zatáčka\ndokončena")
+        self.assertEqual(tail.rows[-1]["simulation_s"], 2000)
+        self.assertLess(tail.bytes_read - initial_bytes, 350)
+
+    def test_tail_resets_on_replacement_truncation_and_same_length_rewrite(self):
+        csv = self.folder / "rewrite.csv"
+        csv.write_text("simulation_s,reason\n1,first\n2,second\n", encoding="utf-8")
+        tail = ProfileTail()
+        tail.update(csv)
+        for replacement in (
+            "simulation_s,reason\n0,fresh\n",
+            "simulation_s,reason\n1,again\n",
+            "simulation_s,reason\n2,new prefix\n3,now larger\n",
+        ):
+            epoch = tail.epoch
+            csv.write_text(replacement, encoding="utf-8")
+            tail.update(csv)
+            self.assertEqual(tail.epoch, epoch + 1)
+            self.assertEqual(tail.rows[0]["reason"], replacement.splitlines()[1].split(",")[1])
+
+    def test_live_viewer_reads_the_recorders_profile_and_follows_new_runs(self):
+        status = self.folder / "timing_diagnostics.json"
+        viewer = ProfileServer(self.folder, port=0, status_path=status)
+        self.addCleanup(viewer.close)
+        for index in range(2):
+            csv = self.folder / f"run_{index}.csv"
+            csv.write_text(f"simulation_s,phase\n{index},NAVIGATING\n", encoding="utf-8")
+            status.write_text(
+                json.dumps(
+                    dict(
+                        recording=True,
+                        updated_unix_s=time.time(),
+                        flight_profile=dict(csv=str(csv)),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with urlopen(viewer.url + "/api/samples", timeout=3) as response:
+                data = json.load(response)
+            self.assertEqual(data["samples"][0]["simulation_s"], index)
+            self.assertEqual(data["total_samples"], 1)
+            self.assertTrue(data["live"])
 
     def test_chart_engine_is_local_and_viewer_uses_capture_events(self):
         with self.read("/") as response:

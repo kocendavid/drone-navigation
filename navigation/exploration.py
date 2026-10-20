@@ -200,7 +200,7 @@ def choose_frontier(
         candidates[key].append((float(distances[cell]), cell, goal))
     assessments = []
     options = []
-    for region in catalog:
+    for region in sorted(catalog, key=lambda row: row["id"] != active_id):
         key = region["id"]
         span, midpoint, axis = boundary_geometry(region["cells"], model.resolution)
         if span < MINIMUM_SPAN_M:
@@ -287,6 +287,11 @@ def choose_frontier(
                     reason="Reachable route through observed free space",
                 )
             )
+            if key == active_id:
+                # A useful active frontier wins by policy. Re-evaluating other
+                # flight routes cannot change this decision; retain their last
+                # work-list estimates until a new frontier must be selected.
+                break
     if not options:
         raise ValueError(
             f"No useful reachable frontier with span at least {MINIMUM_SPAN_M:.1f} m; unknown space may remain"

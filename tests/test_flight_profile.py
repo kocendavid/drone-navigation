@@ -73,6 +73,21 @@ def records(end=5.2, session="bridge", airborne_start=False):
 
 
 class FlightProfileTests(unittest.TestCase):
+    def test_default_live_viewer_reuses_recorder_without_constructing_another_profile(self):
+        from tools import record_flight_profile as tool
+
+        with (
+            patch.object(sys, "argv", ["record_flight_profile.py", "--follow", "--ui-port", "0"]),
+            patch.object(tool, "ProfileServer") as server,
+            patch.object(tool, "FlightProfile", side_effect=AssertionError("duplicate profile")),
+            patch.object(tool.time, "sleep", side_effect=KeyboardInterrupt),
+        ):
+            tool.main()
+        server.assert_called_once_with(
+            tool.PROJECT / "logs", 0, status_path=tool.PROJECT / "logs" / "timing_diagnostics.json"
+        )
+        server.return_value.close.assert_called_once()
+
     def profile(self, rows, **options):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

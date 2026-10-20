@@ -76,7 +76,9 @@ class ProcessIsolationTests(unittest.TestCase):
         ledger.observe_map(snap)
         with ledger.worker.condition:
             self.assertTrue(ledger.worker.condition.wait_for(lambda: ledger.worker.result, 5))
-        self.assertTrue(ledger.ready_for(snap))
+        # This checks persistence across a cold child start. Freshness has its
+        # own regressions; process/import startup is not simulated sensor age.
+        self.assertTrue(ledger.ready_for(snap, now=snap.generated))
         choice = choose_frontier(snap, snap.pose[:2], catalog=ledger.snapshot())
         ledger.apply_choice(choice)
         snap.stamp += 1

@@ -2,10 +2,12 @@ import copy
 import json
 import socket
 import sys
+import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,99 @@ CONFIG["sensor_noise_std"] = {}
 
 
 class PhysicsTests(unittest.TestCase):
+    def bridge_post_step(self, log):
+        return SimpleNamespace(
+            closed=False,
+            view=object(),
+            _body_state=lambda: (np.zeros(3), np.eye(3), np.zeros(3), np.zeros(3)),
+            time_us=1000000,
+            sensor=SimpleNamespace(sample=lambda *args: {}),
+            flu_in_body=np.eye(3),
+            next_gps_us=0,
+            transport=SimpleNamespace(
+                send_sensor=Mock(),
+                armed=False,
+                fresh=lambda timeout: True,
+                controls=[0.0] * 16,
+                received_actuators=0,
+                sent_sensors=0,
+            ),
+            config=CONFIG,
+            last_truth_us=0,
+            clock_pairs=SimpleNamespace(emit=Mock()),
+            manager=SimpleNamespace(get_simulation_time=lambda: 1.0),
+            diagnostics=SimpleNamespace(emit=Mock()),
+            last_log_wall=0,
+            model=SimpleNamespace(omega=np.zeros(4), thrust=np.zeros(4)),
+            force=np.zeros(3),
+            torque=np.zeros(3),
+            log=log,
+            _fail=Mock(),
+        )
+
+    def test_bridge_log_disk_and_console_errors_do_not_stop_sensor_publication(self):
+        from px4_isaac.bridge import BridgeLog, IsaacPX4Bridge
+
+        for target in ("px4_isaac.bridge.Path.open", "builtins.print"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as folder:
+                log = BridgeLog(Path(folder) / "bridge.jsonl")
+                node = self.bridge_post_step(log)
+                try:
+                    with patch(target, side_effect=OSError("diagnostic output failed")):
+                        IsaacPX4Bridge._post_step(node, 0.004, None)
+                        with log.condition:
+                            self.assertTrue(log.condition.wait_for(lambda: log.error, 2))
+                        self.assertIn("diagnostic output failed", log.error)
+                        IsaacPX4Bridge._post_step(node, 0.004, None)
+                        self.assertEqual(node.transport.send_sensor.call_count, 2)
+                        node._fail.assert_not_called()
+                        self.assertFalse(node.closed)
+                finally:
+                    log.close()
+
+    def test_blocked_bridge_log_keeps_callbacks_and_pending_output_bounded(self):
+        from px4_isaac.bridge import BridgeLog, IsaacPX4Bridge
+
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+        def blocked(logger, entry):
+            entered.set()
+            release.wait(3)
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(BridgeLog, "_write", blocked):
+            log = BridgeLog(Path(folder) / "bridge.jsonl")
+            node = self.bridge_post_step(log)
+            try:
+                IsaacPX4Bridge._post_step(node, 0.004, None)
+                self.assertTrue(entered.wait(1))
+
+                def callbacks():
+                    for now in (10.0, 12.0, 14.0):
+                        with patch("px4_isaac.bridge.time.monotonic", return_value=now):
+                            node.last_log_wall = now - 2
+                            IsaacPX4Bridge._post_step(node, 0.004, None)
+                    finished.set()
+
+                caller = threading.Thread(target=callbacks)
+                caller.start()
+                self.assertTrue(finished.wait(1), "Physics callback waited for diagnostic output")
+                caller.join(1)
+                self.assertGreaterEqual(log.superseded, 2)
+                self.assertEqual(node.transport.send_sensor.call_count, 4)
+                node._fail.assert_not_called()
+            finally:
+                release.set()
+                log.close()
+
+    def test_sensor_transport_failure_still_enters_bridge_failure_path(self):
+        from px4_isaac.bridge import IsaacPX4Bridge
+
+        node = self.bridge_post_step(SimpleNamespace())
+        node.transport.send_sensor.side_effect = OSError("sensor transport failed")
+        IsaacPX4Bridge._post_step(node, 0.004, None)
+        node._fail.assert_called_once()
+        self.assertEqual(str(node._fail.call_args.args[0]), "sensor transport failed")
+
     def test_disarmed_zero_wrench_is_not_applied_to_resting_articulation(self):
         from px4_isaac.bridge import IsaacPX4Bridge
 

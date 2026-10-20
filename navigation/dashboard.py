@@ -28,6 +28,9 @@ def validate_destination(point):
 class Dashboard:
     def __init__(self, feed, commands=None, port=8787, history=None):
         self.presentation = ProcessService("dashboard", "navigation.report_jobs:PresentationJobs")
+        self.preview_planning = ProcessService(
+            "route_preview", "navigation.report_jobs:PresentationJobs"
+        )
         self.feed = feed
         self.commands = commands
         self.reset = None
@@ -54,7 +57,11 @@ class Dashboard:
 
             def respond(self, status, payload, kind="application/json"):
                 body = (
-                    owner.presentation.call(("json", payload))
+                    (
+                        json.dumps(payload, allow_nan=False).encode()
+                        if self.path.startswith(("/api/command", "/api/preview", "/api/home-route"))
+                        else owner.presentation.call(("json", payload))
+                    )
                     if kind == "application/json"
                     else payload.encode()
                 )
@@ -332,7 +339,7 @@ class Dashboard:
         snap, failure = self.feed.get()
         if failure or snap is None or not snap.fresh(time.monotonic()):
             raise ValueError(failure or "Waiting for fresh map")
-        return point, self.presentation.call(("plan", (snap, point)))
+        return point, self.preview_planning.call(("plan", (snap, point)))
 
     def plan_home(self):
         """Read-only demonstration of the same planner used by Return to start."""
@@ -406,4 +413,5 @@ class Dashboard:
         self.server.server_close()
         self.thread.join(timeout=2)
         self.history.close()
+        self.preview_planning.close()
         self.presentation.close()

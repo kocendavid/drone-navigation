@@ -11,13 +11,14 @@ The [teaching guide](TEACHER_GUIDE.md) explains each file's responsibilities,
 key functions and connections through the system. Previous mentoring notes and
 diagnostic findings are preserved in [teaching history](docs/history/TEACHING_NOTES_2026-10-19.md).
 
-Updated **2026-10-19**. The current maze configuration covers 64 × 53 m at
+Updated **2026-10-20**. The current maze configuration covers 64 × 53 m at
 0.2 m resolution, with floor Z near −3.98 m. Scene preparation and disarmed
 Isaac/PX4 readiness have been verified in individual ground checks. Recorded
 exploration runs are available. Clock/geometry separation is loaded and has a
 ground transport check; the latest near-hover turn policy passes offline tests
 and still needs moving-flight evaluation. Vertical estimation disagreement and
-landing detection remain open issues. The current full Python suite passes 347 tests.
+landing detection remain open issues. The current full Python suite runs 463 tests:
+462 pass and the optional PNG-export test skips without matplotlib.
 See [current maze setup](docs/MAZE_SETUP.txt) for the detailed procedure.
 
 ## Contents
@@ -751,6 +752,14 @@ publisher and time implementation for comparison or rollback. Observer mode
 does not load the publisher. Benchmark method and results are in
 `benchmarks/README.md`.
 
+The same build command also builds weighted A* and completion flood fill from
+`native_navigation/` into `.tools/native_navigation/`. Planning workers use these
+C++ kernels automatically; smoothing, scoring and route safety checks retain
+their existing Python behavior. Python references remain available for parity
+checks and installations without a navigation build. A stale existing build
+is rejected. Preview planning has its own process, separate from map/status
+presentation; small command acknowledgements are encoded in their HTTP thread.
+
 The native component owns ROS message construction/serialization, a dedicated
 publication thread with a 50 ms repeat interval, XRCE timesync subscription,
 Isaac trajectory-clock state, source-clock conversion and reference history. It uses a high-resolution
@@ -1027,8 +1036,11 @@ Speed-decision fields distinguish:
 
 `dominant_limit` identifies the final effective ceiling reduction; an acceleration
 limit can still keep the current command below that ceiling. A "Slowing for
-tracking lag" event therefore displays expected/current speeds and the actual
-command action, making continued acceleration visible. Values are in metres and
+tracking lag" event displays the expected/current world XY positions used by the
+tracking check and their error in metres. The expected position is the aligned
+reference, or the predicted reference when alignment is unavailable. Other speed
+decisions display explicitly labelled speeds and the actual command action.
+Older events without recorded positions display unavailable values. Values are in metres and
 simulated seconds. Speed reports still pair the latest measured speed with the
 command; the tracking alignment fields describe position-error timing separately.
 
@@ -1363,6 +1375,60 @@ observed state changes. That trace contains no historical grids, so it cannot
 reconstruct what LiDAR showed at the earlier edge incident. The recovered JSON
 is a separate legacy artifact; new dashboard map replay starts with new recordings.
 
+### LiDAR yaw distortion and persistent walls, 20 October
+
+The live Example_Rotary sensor had accumulated 10 Hz scans in `NONCOMPENSATED`
+mode with renderer Motion BVH disabled. During yaw, capture-time TF alone cannot
+remove motion within the 100 ms sweep. Repeated misplaced hits could become
+permanent walls after three confirmation votes.
+
+`load_bridge.py` now runs `tools/configure_navigation_lidar.py` before replacing
+the bridge. This requires a stopped timeline, backs up the root/session layers,
+enables Motion BVH, `COMPENSATED` output and instantaneous full sweeps, and
+retains `SENSOR` coordinates so the mapper applies capture-time TF exactly once.
+The installed SDK's rolling compensation flag alone failed the moving replay.
+The working setting changes the simulated exposure model: each full sweep is
+sampled at frame end, rather than mixing poses within a rolling sweep. The
+existing 10 Hz sensor tick is retained.
+
+The existing ROS publisher already stamps snapshots at capture end and is
+retained unchanged. Internal GMO `timestampNs` describes scan start, which is
+100 ms earlier for this profile; that metadata must not be mistaken for the
+published ROS header or used to add another timestamp offset. The replay uses
+the rendered frame-end pose, and a passive ROS check verifies cloud/clock timing.
+The normal ground-reset
+sequence applies these settings before Play; an in-flight load is rejected.
+Scene edits are not automatically saved to the scene file.
+
+The sensor setup and map worker share an exposure duration of zero for these
+validated instantaneous sweeps. Each scan requires a valid capture-time pose
+and can add a wall-confirmation vote while moving: the 100 ms interval between
+ticks is not an exposure. Previously applying a rolling-scan motion budget to
+this interval withheld votes even at the configured 1.2 m/s cruise speed and
+left real walls tentative. Three actual scan hits are still required.
+For a rolling source, the worker instead samples five poses across its exposure;
+translation plus rotation at the 12 m mapping horizon must fit within half a map
+cell. Missing history or excess motion breaks pending votes. Unknown exposure
+cannot certify a scan. The worker records `wall_confirmation` in diagnostics.
+
+A free ray grazing a tentative wall cell cannot erase it when the current scan
+has an endpoint in that cell or one of its eight neighbours. This resolves the
+ambiguity of a wall and free space sharing a grid cell, without filling unknown
+cells, adding hit votes, or thickening walls. A ray passing through the old cell
+with no nearby endpoint can still clear a misplaced tentative obstacle. Existing
+confirmed walls remain protected until Reset. The new rules apply on the next
+normal archived ground reset/reload; existing contaminated maps need that reset.
+
+`tools/validate_lidar_compensation.py` runs inside Isaac after ground reset with
+the navigator stopped. It compares the old rolling scan against the snapshot
+configuration using a temporary sensor at 60°/s yaw. Both use capture-end poses.
+It temporarily redirects the existing LiDAR render stream, restores it in
+`finally`, checks rendered GMO flags and timing, and records wall residuals in
+`results/lidar_compensation_validation.json`. The drone stays disarmed; the test
+creates no flight publishers or vehicle-pose changes. Restart the navigator
+only after the report finishes. A configured attribute alone is not a passing
+moving-scan validation.
+
 ### Investigation of the wall/edge anomaly, 16 October
 
 The reopened scene had lost its maze collision APIs, old-room deactivation and two
@@ -1465,8 +1531,9 @@ Tracking work is separated from slow navigation work. Planning workers prepare
 route cell footprints and speed profiles; the flight callback checks those cells
 against the newest map using array operations, plus immediate connector/step and
 LiDAR checks. A changed map can still invalidate a route immediately. Frontier
-geometry and ledger updates run in a latest-snapshot worker; selection waits for
-a result belonging to the current map stamp. Visualization, status notices, disk
+geometry and ledger updates run in a latest-snapshot worker; selection uses its
+matching source snapshot while both that snapshot and the current map are fresh.
+Completion evidence still requires the exact current map stamp. Visualization, status notices, disk
 reports and runtime fingerprint reads run outside the tracking callback. Reports
 retain their capture times. Workers have bounded pending input and cannot publish
 late results after shutdown. The follower and its mutable control state still
@@ -1482,6 +1549,15 @@ only the newest pending input; history retains its bounded recording queue.
 The follower remains owned by the control callback, and new routes still pass
 current-map and generation checks. Process isolation removes competition for the
 controller's Python execution lock; host CPU scheduling and IPC still have costs.
+
+Reconsideration plans the active frontier first and skips alternatives while it
+remains useful and reachable. Other work-list estimates refresh when selection
+needs them. Map presentation uses the cached centerline without constructing
+route costs. Major direction changes use one stopping-envelope maneuver:
+validate measured velocity and complete stopping space, decelerate, wait for
+measured near-hover, then request a fresh onward route. Missing handover feedback
+pauses with a reason. Curve preparation and following share the same named
+acceleration-budget constant.
 
 Clock records are consumed by a dedicated pipe reader. Map clearance and center
 geometry are built in a separate process, with just the newest cumulative map
@@ -1546,20 +1622,25 @@ interactive charts that update as simulation-time samples are captured:
 
 ```text
 python tools/record_flight_profile.py logs/timing_<run>/events.jsonl
-python tools/record_flight_profile.py --latest-run --follow
+python tools/record_flight_profile.py --follow
 python tools/record_flight_profile.py --plot-csv logs/flight_profiles/flight_<session>_0.csv
 ```
 
-Outputs default to `logs/flight_profiles/`: CSV, metadata JSON, a whole-flight
-PNG and a navigation-detail PNG including the pause and following 12 seconds.
-The live follower writes `status.json` with current output paths. Use `--floor-z`
+Offline replay outputs default to `logs/flight_profiles/`: CSV, metadata JSON,
+a whole-flight PNG and a navigation-detail PNG including the pause and following
+12 seconds. Default `--follow` serves the timing recorder's existing CSV under
+`logs/timing_<run>/flight_profiles/`, using `logs/timing_diagnostics.json` to follow
+run changes. It does not replay the recording or generate a duplicate profile.
+An explicit recording with `--follow` retains replay support and writes its own
+`status.json`. Use `--floor-z`
 when the recording used a floor different from `config/navigation_settings.json`.
 This tool only reads the existing recording; it never commands a flight.
 CSV recording and the live viewer use the Python standard library. Offline PNG
-exports (including the final export on shutdown) also need `matplotlib`.
+exports (including shutdown export for explicit replay) also need `matplotlib`.
 
-The dashboard places **Altitude & speed** in the third column beside the map
-and navigation controls, stacking below them on narrower screens. Locally bundled
+The dashboard shows navigation controls on the left and the local map in the
+remaining space, with the event log beneath both. The **Altitude & speed** column
+is hidden; its standalone viewer remains available. Locally bundled
 uPlot 1.6.32 charts provide shared hover values, legend toggles, and drag zoom;
 hover labels and time axes show capture date/time in Europe/Prague. Clock pairs
 saved with the recording preserve time-of-day through slow simulation and pauses.
@@ -1570,7 +1651,9 @@ Event marker labels show the event's recorded date/time.
 **Follow live** or a double-click resets zoom. Select **Navigation & pause** or
 **Full flight**, expand the charts, or download the CSV. Captured samples stream
 to the browser over server-sent events without waiting for PNG rendering or a
-five-second timer. The existing two simulation seconds of source-alignment
+five-second timer. The server parses appended complete CSV records and streams
+only new samples after the initial snapshot; status heartbeats carry no samples.
+The existing two simulation seconds of source-alignment
 buffering still apply. The passive follower serves this viewer
 at `http://127.0.0.1:8788/`; it can update while the navigator keeps running.
 `tools/lab.ps1 start navigator` and `start all` also start/reuse the `profile`

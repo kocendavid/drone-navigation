@@ -210,6 +210,22 @@ def main():
         for path in plot_profile(args.plot_csv):
             print(path, flush=True)
         return
+    if args.follow and args.recording is None:
+        # The timing recorder already produces aligned CSV samples. The live
+        # viewer follows those files directly, including recorder/run changes.
+        viewer = ProfileServer(
+            PROJECT / "logs",
+            args.ui_port,
+            status_path=PROJECT / "logs" / "timing_diagnostics.json",
+        )
+        try:
+            while True:
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            viewer.close()
+        return
     floor = args.floor_z
     if floor is None:
         floor = json.loads((PROJECT / "config" / "navigation_settings.json").read_text())[

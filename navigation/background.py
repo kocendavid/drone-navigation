@@ -13,6 +13,7 @@ class LatestWorker:
         self.pending = None
         self.last_key = None
         self.result = None
+        self.result_input = None
         self.failure = None
         self.stopping = False
         self.superseded = 0
@@ -32,6 +33,12 @@ class LatestWorker:
     def latest(self):
         with self.condition:
             return self.result, self.failure
+
+    def latest_with_input(self):
+        """Return a result and its original input atomically, without extra IPC."""
+        with self.condition:
+            result, failure = self.latest()
+            return result, failure, self.result_input if result is not None else None
 
     def _run(self):
         try:
@@ -59,6 +66,7 @@ class LatestWorker:
                 with self.condition:
                     if not self.stopping:
                         self.result = (key, result)
+                        self.result_input = value
                         self.failure = None
                         self.condition.notify_all()
         finally:

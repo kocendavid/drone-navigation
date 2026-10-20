@@ -20,6 +20,15 @@ class CompletionEvidence:
 
 
 def assess_completion(snapshot, start_xy):
+    from .native_planning import native_planning
+
+    native = native_planning()
+    if native is not None:
+        return native.completion(snapshot, start_xy)
+    return assess_completion_python(snapshot, start_xy)
+
+
+def assess_completion_python(snapshot, start_xy):
     """Require an enclosed observed component, not exhaustion of a heuristic.
 
     This concerns the connected fixed-height space visible from this mission.

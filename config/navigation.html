@@ -290,10 +290,10 @@
       }
       .layout {
         display: grid;
-        grid-template-columns: minmax(0, 1.5fr) 300px minmax(350px, 1fr);
+        grid-template-columns: 300px minmax(0, 1fr);
         grid-template-areas:
-          "map controls profile"
-          "history history profile";
+          "controls map"
+          "history history";
         gap: 14px;
         align-items: start;
       }
@@ -627,7 +627,7 @@
       }
       @media (min-width: 1500px) {
         .layout {
-          grid-template-columns: minmax(0, 1.5fr) 340px minmax(420px, 1fr);
+          grid-template-columns: 340px minmax(0, 1fr);
         }
       }
       @media (max-width: 1150px) {
@@ -654,11 +654,10 @@
           max-width: 50%;
         }
         .layout {
-          grid-template-columns: minmax(0, 1fr) 320px;
+          grid-template-columns: 320px minmax(0, 1fr);
           grid-template-areas:
-            "map controls"
-            "history history"
-            "profile profile";
+            "controls map"
+            "history history";
         }
       }
       @media (max-width: 760px) {
@@ -673,7 +672,7 @@
         }
         .layout {
           grid-template-columns: 1fr;
-          grid-template-areas: "map" "controls" "history" "profile";
+          grid-template-areas: "controls" "map" "history";
         }
         canvas {
           max-height: min(50vh, 390px);
@@ -900,41 +899,6 @@
         </div>
       </dl>
       <div class="layout">
-        <section class="map">
-          <div class="map-header">
-            <h2>Local map</h2>
-            <p id="map-context" role="status">Live map · provisional observations</p>
-            <button id="live-view" class="primary" type="button" hidden>Return to live map</button>
-          </div>
-          <div class="map-viewport">
-            <canvas
-              id="map"
-              width="900"
-              height="900"
-              aria-label="Live overhead room map with drone, obstacles, and route. Click observed space to preview a destination."
-              >Live room map</canvas
-            >
-            <div id="map-loading" class="map-loading" role="status" data-loading="true">
-              Waiting for LiDAR and transforms
-            </div>
-          </div>
-          <div class="legend">
-            <span><i class="swatch" style="background: var(--free)"></i>Observed</span
-            ><span><i class="swatch" style="background: var(--obstacle)"></i>Confirmed wall</span
-            ><span><i class="swatch" style="background: #e3af72"></i>Tentative obstacle</span
-            ><span><i class="swatch" style="background: var(--unknown)"></i>Unknown</span
-            ><span><i class="swatch" style="background: #34556d"></i>Start area</span
-            ><span><i class="swatch" style="background: var(--margin)"></i>Margin</span
-            ><span><i class="swatch" style="background: var(--cyan)"></i>Route</span
-            ><span><i class="swatch" style="background: #b1b8d1"></i>Flown</span
-            ><span><i class="swatch" style="background: #f0d670"></i>Frontier</span>
-          </div>
-          <div class="map-footer">
-            <span id="fresh">Waiting for map</span
-            ><label><input id="show-centers" type="checkbox" checked /> Known-space centers</label
-            ><span>Click observed space to preview a destination</span>
-          </div>
-        </section>
         <aside class="side">
           <section class="card navigation-card" aria-label="Flight and navigation controls">
             <div class="section-heading">
@@ -1031,7 +995,47 @@
             </button>
           </section>
         </aside>
-        <section class="card" id="flight-profile-panel" aria-label="Live flight altitude and speed">
+        <section class="map">
+          <div class="map-header">
+            <h2>Local map</h2>
+            <p id="map-context" role="status">Live map · provisional observations</p>
+            <button id="live-view" class="primary" type="button" hidden>Return to live map</button>
+          </div>
+          <div class="map-viewport">
+            <canvas
+              id="map"
+              width="900"
+              height="900"
+              aria-label="Live overhead room map with drone, obstacles, and route. Click observed space to preview a destination."
+              >Live room map</canvas
+            >
+            <div id="map-loading" class="map-loading" role="status" data-loading="true">
+              Waiting for LiDAR and transforms
+            </div>
+          </div>
+          <div class="legend">
+            <span><i class="swatch" style="background: var(--free)"></i>Observed</span
+            ><span><i class="swatch" style="background: var(--obstacle)"></i>Confirmed wall</span
+            ><span><i class="swatch" style="background: #e3af72"></i>Tentative obstacle</span
+            ><span><i class="swatch" style="background: var(--unknown)"></i>Unknown</span
+            ><span><i class="swatch" style="background: #34556d"></i>Start area</span
+            ><span><i class="swatch" style="background: var(--margin)"></i>Margin</span
+            ><span><i class="swatch" style="background: var(--cyan)"></i>Route</span
+            ><span><i class="swatch" style="background: #b1b8d1"></i>Flown</span
+            ><span><i class="swatch" style="background: #f0d670"></i>Frontier</span>
+          </div>
+          <div class="map-footer">
+            <span id="fresh">Waiting for map</span
+            ><label><input id="show-centers" type="checkbox" checked /> Known-space centers</label
+            ><span>Click observed space to preview a destination</span>
+          </div>
+        </section>
+        <section
+          class="card"
+          id="flight-profile-panel"
+          aria-label="Live flight altitude and speed"
+          hidden
+        >
           <h2>Altitude &amp; speed</h2>
           <iframe
             id="flight-profile-frame"
@@ -1049,7 +1053,9 @@
               Return to live map
             </button>
           </div>
-          <p id="graph-event-hint" class="help">Hover an event to mark its time on the charts.</p>
+          <p id="graph-event-hint" class="help" hidden>
+            Hover an event to mark its time on the charts.
+          </p>
           <details class="log-filters">
             <summary id="log-filter-summary">Filter event types</summary>
             <p class="help">
@@ -1245,6 +1251,7 @@
         return Number.isFinite(stamp) ? { time: stamp / 1e9 } : null;
       }
       async function highlightGraphEvent(element) {
+        if (byId("flight-profile-panel").hidden) return;
         const row = graphEventRows.get(element?.dataset.logKey);
         if (!row) return clearGraphEvent();
         const history = historyData();
@@ -1923,12 +1930,25 @@
                   row.target.xy.map((v) => v.toFixed(1)).join(", ") +
                   ") m · "
                 : "") + (row.reason || "");
-            if (row.speed_decision) {
+            if (/tracking/i.test(row.reason || "")) {
+              const tracking = row.tracking;
+              const position = (xy) =>
+                Array.isArray(xy) && xy.length === 2 && xy.every(Number.isFinite)
+                  ? "(" + xy.map((v) => format(v)).join(", ") + ") m"
+                  : "—";
+              message.textContent +=
+                " · expected XY " +
+                position(tracking?.predicted_reference_xy) +
+                " · current XY " +
+                position(tracking?.measured_xy) +
+                " · tracking error " +
+                format(tracking?.error_m ?? row.speed_decision?.tracking_error_m, " m");
+            } else if (row.speed_decision) {
               const speed = row.speed_decision;
               message.textContent +=
-                " · expected " +
+                " · expected speed " +
                 format(speed.expected_speed_m_s, " m/s") +
-                " · current " +
+                " · current speed " +
                 format(speed.current_speed_m_s, " m/s") +
                 (speed.action ? " · command " + speed.action.replaceAll("_", " ") : "");
             }

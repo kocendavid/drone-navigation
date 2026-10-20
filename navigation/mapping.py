@@ -113,7 +113,15 @@ class RayMap:
         return 0 <= cell[0] < self.grid.shape[0] and 0 <= cell[1] < self.grid.shape[1]
 
     def update(
-        self, sensor_xyz, world_rotation, world_translation, body_xy, body_world_z, near_range=0.5
+        self,
+        sensor_xyz,
+        world_rotation,
+        world_translation,
+        body_xy,
+        body_world_z,
+        near_range=0.5,
+        *,
+        allow_wall_confirmation=True,
     ):
         xyz = np.asarray(sensor_xyz, dtype=float).reshape(-1, 3)
         finite = np.isfinite(xyz).all(axis=1)
@@ -180,10 +188,26 @@ class RayMap:
         # Hits win conflicts within a scan. Missing coverage is neutral; an
         # explicit free-only observation resets an unconfirmed hit streak.
         free_only = free_cells & ~hit_cells
+        # A ray can graze the free part of a cell that also contains a wall.
+        # Current neighbouring endpoints make clearing that old obstacle
+        # ambiguous at this resolution. Retain it without adding any hit votes
+        # or filling unknown cells; a ray continuing beyond the neighbourhood
+        # can still clear a misplaced tentative obstacle.
+        padded_hits = np.pad(hit_cells, 1)
+        near_hit = np.zeros_like(hit_cells)
+        for dy in range(3):
+            for dx in range(3):
+                near_hit |= padded_hits[dy : dy + h, dx : dx + w]
+        free_only &= ~((self.grid == OCCUPIED) & near_hit)
         self.wall_hit_scans[free_only & ~self.confirmed_walls] = 0
-        self.wall_hit_scans[hit_cells] = np.minimum(
-            self.WALL_CONFIRMATION_SCANS, self.wall_hit_scans[hit_cells] + 1
-        )
+        if allow_wall_confirmation:
+            self.wall_hit_scans[hit_cells] = np.minimum(
+                self.WALL_CONFIRMATION_SCANS, self.wall_hit_scans[hit_cells] + 1
+            )
+        else:
+            # Motion-distorted hits remain immediate, clearable obstacles.
+            # They cannot complete an old streak or bridge two quiet periods.
+            self.wall_hit_scans[~self.confirmed_walls] = 0
         self.confirmed_walls |= self.wall_hit_scans >= self.WALL_CONFIRMATION_SCANS
         self.grid[free_only & ~self.confirmed_walls] = FREE
         # A first hit blocks planning immediately. Confirmation adds persistence,

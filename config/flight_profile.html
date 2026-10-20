@@ -509,12 +509,27 @@
       });
 
       function receive(data) {
+        if (data.reset || run !== data.run) {
+          samples = data.samples;
+          zoom = null;
+          if (run !== null) eventHighlight = null;
+          run = data.run;
+        } else if (data.offset === samples.length) {
+          for (const sample of data.samples) samples.push(sample);
+        } else {
+          // Recover a missed/obsolete delta with one full snapshot.
+          fetch("/api/samples")
+            .then((response) => response.json())
+            .then(receive)
+            .catch(() => {});
+          return;
+        }
         status.dataset.live = String(data.live);
         status.textContent =
           (data.live ? "● Recording" : "Last recording") +
           (data.simulation_s == null
             ? " · waiting for samples"
-            : " · " + wallTimestamp(data.samples.at(-1)?.timestamp_unix_s));
+            : " · " + wallTimestamp(data.timestamp_unix_s));
         byId("csv").setAttribute("aria-disabled", String(!data.csv_available));
         view.options[0].disabled = !data.navigation_available;
         const previousView = view.value;
@@ -523,12 +538,6 @@
         byId("open").href = "/?view=" + view.value;
         if (version === data.version && previousView === view.value) return;
         version = data.version;
-        if (run !== data.run) {
-          zoom = null;
-          if (run !== null) eventHighlight = null;
-          run = data.run;
-        }
-        samples = data.samples;
         byId("waiting").hidden = !!samples.length;
         byId("charts").hidden = !samples.length;
         if (!samples.length) return;

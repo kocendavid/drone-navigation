@@ -2,8 +2,10 @@
 
 import json
 from pathlib import Path
-from queue import Queue
+import pickle
+from queue import Queue, Full
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -12,7 +14,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 from navigation.dashboard import Dashboard
-from navigation.history import RunHistory, CommandReceipts
+from navigation.history import RunHistory, CommandReceipts, HistoryQueue, retained_bytes
 from navigation.mapping import RayMap, FREE, OCCUPIED
 from tools.recover_navigation_history import recover
 from navigation.flight_controls import FlightControls
@@ -20,7 +22,7 @@ from navigation.flight_controls import FlightControls
 
 class HistorySnapshot(SimpleNamespace):
     def fresh(self, now):
-        return True
+        return getattr(self, "is_fresh", True)
 
 
 def snapshot():
@@ -53,6 +55,112 @@ def report(goal=None, phase="NAVIGATING", reason="Following route", simulation_s
 
 
 class HistoryTests(unittest.TestCase):
+    def test_compact_pipe_preserves_decisions_poses_transitions_and_frame_evidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            remote = RunHistory(Path(folder) / "remote.jsonl")
+            local = RunHistory()
+            local.path = Path(folder) / "local.jsonl"
+            wire = []
+            call = remote.service.call
+
+            def capture(item):
+                # Inspect precisely what the real relay sends to the real child.
+                encoded = pickle.dumps(item, protocol=5)
+                wire.append((pickle.loads(encoded), len(encoded)))
+                return call(item)
+
+            remote.service.call = capture
+            try:
+                for i, simulation_s in enumerate((10, 10.05, 10.1, 15, 15.05, 15.1)):
+                    snap = snapshot()
+                    snap.pose[0] = i * 0.2
+                    snap.scans += i
+                    snap.is_fresh = i not in (2, 3)
+                    if i >= 4:
+                        snap.model.grid[3, 3] = OCCUPIED
+                        snap.model.confirmed_walls[3, 3] = True
+                    state = report([1.0, 0.0], simulation_s=simulation_s)
+                    state["unused_dashboard_blob"] = "x" * 100_000
+                    state["speed_decision"] = dict(expected_speed_m_s=i * 0.1)
+                    if i == 4:
+                        state["goal"] = [2.0, 0.0]
+                    if i == 5:
+                        state.update(phase="BLOCKED", reason="Route changed")
+                    self.assertTrue(remote.observe(state, snap, 100))
+                    local.observe(state, snap, 100)
+                self.assertTrue(remote.flush(timeout=10))
+                self.assertIsNone(remote.error)
+                self.assertEqual(sum(item[2] is not None for item, _ in wire), 4)
+                routine = [(item, size) for item, size in wire if item[2] is None]
+                self.assertEqual(len(routine), 2)
+                self.assertLess(max(size for _, size in routine), 1024)
+                self.assertTrue(all("unused_dashboard_blob" not in item[1] for item, _ in routine))
+
+                def rows(path):
+                    return [
+                        {k: v for k, v in json.loads(line).items() if k not in ("utc", "run_id")}
+                        for line in path.read_text().splitlines()
+                    ]
+
+                records = rows(remote.path)
+                self.assertEqual(records, rows(local.path))
+                self.assertEqual(sum(row["type"] == "speed_decision" for row in records), 6)
+                poses = [row["xy"] for row in records if row["type"] == "pose"]
+                self.assertEqual(poses, [[0.0, 0.0], [0.2, 0.0], [0.8, 0.0], [1.0, 0.0]])
+                frames = [row for row in records if row["type"] == "frame"]
+                self.assertFalse(frames[1]["map_fresh"])
+                self.assertEqual(frames[2]["cell_changes"]["free_to_occupied"], 1)
+                self.assertEqual(frames[2]["confirmed_walls"][3 * 20 + 3], "1")
+            finally:
+                remote.close()
+
+    def test_rejected_frame_is_retried_and_does_not_advance_selection(self):
+        history = RunHistory(queue_max_records=1)
+        # Stall consumption to exercise the production admission/drop path.
+        history.thread = True
+        snap = snapshot()
+        self.assertTrue(history.observe(report([1, 0]), snap, 100))
+        self.assertFalse(history.observe(report([2, 0]), snap, 100))
+        history.queue.get_nowait()
+        history.queue.task_done()
+        self.assertTrue(history.observe(report([2, 0]), snap, 100))
+        item = history.queue.get_nowait()
+        history.queue.task_done()
+        self.assertIs(item[2], snap)
+        self.assertEqual(history.report()["dropped_records"], 1)
+        self.assertEqual(history.report()["queue"]["bytes"], 0)
+
+    def test_byte_limit_rejects_frames_without_retaining_them(self):
+        history = RunHistory(queue_max_bytes=4096)
+        history.thread = True
+        self.assertFalse(history.observe(report([1, 0]), snapshot(), 100))
+        self.assertEqual(history.queue.qsize(), 0)
+        self.assertEqual(history.queue.report()["bytes"], 0)
+        self.assertEqual(history.dropped, 1)
+        self.assertIsNone(history.submitted_frame_s)
+
+    def test_tracking_event_preserves_the_comparison_positions_in_recording(self):
+        with tempfile.TemporaryDirectory() as folder:
+            history = RunHistory(Path(folder) / "tracking.jsonl")
+            try:
+                state = report(reason="Slowing for tracking lag")
+                state["tracking"] = dict(
+                    predicted_reference_xy=[2.72, -1.1],
+                    reference_xy=[2.68, -1.1],
+                    measured_xy=[2.55, -1.1],
+                    error_m=0.17,
+                    reference_time_aligned=True,
+                )
+                history.observe(state, snapshot(), 100)
+                self.assertTrue(history.flush())
+                event = next(e for e in history.report()["events"] if e["kind"] == "state")
+                self.assertEqual(event["tracking"], state["tracking"])
+                rows = [json.loads(line) for line in history.path.read_text().splitlines()]
+                saved = next(r for r in rows if r["type"] == "event" and r["kind"] == "state")
+                self.assertEqual(saved["tracking"], state["tracking"])
+            finally:
+                history.close()
+
     def test_process_writer_keeps_a_recording_error_after_later_success(self):
         from navigation.report_jobs import HistoryProcessor
 
@@ -314,6 +422,69 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(result["trail"], [[0.0, 0.0], [0.2, 0.0]])
             self.assertEqual([t["xy"] for t in result["targets"]], [[1.0, 0.0], [2.0, 0.0]])
             self.assertEqual(result["targets"][0]["status"], "superseded")
+
+
+class HistoryQueueTests(unittest.TestCase):
+    def test_blocked_byte_admission_wakes_when_record_is_consumed(self):
+        item = ("event", "probe", "record", {"payload": bytes(10_000)})
+        queue = HistoryQueue(maxsize=10, max_bytes=retained_bytes(item))
+        queue.put_nowait(item)
+        started, admitted = threading.Event(), threading.Event()
+
+        def producer():
+            started.set()
+            queue.put(item, timeout=2)
+            admitted.set()
+
+        thread = threading.Thread(target=producer)
+        thread.start()
+        try:
+            self.assertTrue(started.wait(1))
+            self.assertFalse(admitted.is_set())
+            queue.get_nowait()
+            queue.task_done()
+            self.assertTrue(admitted.wait(2))
+            queue.get_nowait()
+            queue.task_done()
+            queue.join()
+            self.assertEqual(queue.report()["bytes"], 0)
+        finally:
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+
+    def test_byte_budget_and_item_budget_are_independent_and_released_on_get(self):
+        item = ("event", "probe", "record", {"payload": bytes(10_000)})
+        weight = retained_bytes(item)
+        queue = HistoryQueue(maxsize=10, max_bytes=2 * weight - 1)
+        queue.put_nowait(item)
+        with self.assertRaises(Full):
+            queue.put_nowait(item)
+        self.assertEqual(queue.qsize(), 1)
+        self.assertEqual(queue.report()["bytes"], weight)
+        self.assertIs(queue.get_nowait(), item)
+        queue.task_done()
+        self.assertEqual(queue.report()["bytes"], 0)
+        queue.put_nowait(item)
+        queue.get_nowait()
+        queue.task_done()
+        queue.join()
+        self.assertLessEqual(queue.report()["peak_bytes"], queue.max_bytes)
+
+        queue = HistoryQueue(maxsize=1, max_bytes=10 * weight)
+        queue.put_nowait(item)
+        with self.assertRaises(Full):
+            queue.put_nowait(item)
+        self.assertLess(queue.report()["bytes"], queue.max_bytes)
+
+    def test_retained_size_counts_base_array_of_a_small_view_and_handles_cycles(self):
+        import numpy as np
+
+        array = np.empty(1_000_000)
+        view = array[:1]
+        self.assertGreaterEqual(retained_bytes(view), array.nbytes)
+        cycle = [view]
+        cycle.append(cycle)
+        self.assertGreaterEqual(retained_bytes(cycle), array.nbytes)
 
 
 if __name__ == "__main__":
