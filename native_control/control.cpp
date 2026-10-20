@@ -22,6 +22,11 @@ static thread_local std::string last_error;
 struct PublicationStats {
   uint64_t published = 0, expired = 0, rejected = 0, repeats = 0;
 };
+struct SubmissionState {
+  int64_t issued_ns = 0, entered_ns = 0, validated_ns = 0, completed_ns = 0;
+  int64_t previous_issued_ns = 0, graph_ns = 0, publish_ns = 0;
+  int64_t reason = 0, invalid_index = -1, mode_publishers = 0, target_publishers = 0;
+};
 struct BenchRow {
   int64_t issued;
   double duration_us;
@@ -48,6 +53,7 @@ public:
   Timeline *timeline;
   TrajectoryClock *clock;
   PublicationStats stats;
+  SubmissionState submission, rejection;
   bool flight_topics;
   size_t bench_count = 0;
   int64_t bench_start = 0;
@@ -163,13 +169,36 @@ public:
     changed.wait_for(lock, std::chrono::nanoseconds(nanoseconds));
 #endif
   }
-  bool publish_locked(const std::array<double, 8> &frame, bool repeat) {
-    if (flight_topics &&
-        (node->count_publishers("/fmu/in/offboard_control_mode") > 1 ||
-         node->count_publishers("/fmu/in/trajectory_setpoint") > 1)) {
-      ++stats.rejected;
+  bool publish_locked(const std::array<double, 8> &frame, bool repeat,
+                      SubmissionState *timing = nullptr) {
+    if (flight_topics) {
+      const auto began = qpc_ns();
+      const auto modes = node->count_publishers("/fmu/in/offboard_control_mode");
+      const auto targets = node->count_publishers("/fmu/in/trajectory_setpoint");
+      if (timing) {
+        timing->graph_ns = qpc_ns() - began;
+        timing->mode_publishers = static_cast<int64_t>(modes);
+        timing->target_publishers = static_cast<int64_t>(targets);
+      }
+      if (modes > 1 || targets > 1) {
+        if (timing)
+          timing->reason = 7;
+        ++stats.rejected;
+        return false;
+      }
+    }
+    // A slow ROS graph lookup must not publish a command that aged out while
+    // being checked. Benchmarks have no command lease.
+    if (!bench && qpc_ns() - issued_ns > 100000000) {
+      if (timing) {
+        timing->reason = 5;
+        ++stats.rejected;
+      } else {
+        ++stats.expired;
+      }
       return false;
     }
+    const auto publish_started = qpc_ns();
     const auto publication_started = trace_publications ? qpc_ns() : 0;
     px4_msgs::msg::OffboardControlMode m{};
     px4_msgs::msg::TrajectorySetpoint t{};
@@ -191,6 +220,8 @@ public:
     mode->publish(m);
     target->publish(t);
     last_publication_ns = qpc_ns();
+    if (timing)
+      timing->publish_ns = last_publication_ns - publish_started;
     if (trace_publications && bench_rows.size() < 10000)
       bench_rows.push_back(
           {publication_started,
@@ -202,17 +233,34 @@ public:
     return true;
   }
   bool submit(const double *values, int64_t issued) {
+    const auto entered = qpc_ns();
     std::lock_guard<std::mutex> lock(mutex);
     const int64_t now = qpc_ns();
-    bool valid = !stopped && !bench && issued > issued_ns && now >= issued &&
-                 now - issued <= 100000000;
-    for (int i : {0, 1, 2, 3, 4, 7})
-      valid = valid && std::isfinite(values[i]);
-    valid = valid && ((std::isfinite(values[5]) && std::isfinite(values[6])) ||
-                      (std::isnan(values[5]) && std::isnan(values[6])));
-    if (!valid) {
+    submission = SubmissionState{};
+    submission.issued_ns = issued;
+    submission.entered_ns = entered;
+    submission.validated_ns = now;
+    submission.previous_issued_ns = issued_ns;
+    submission.reason = stopped ? 1 : bench ? 2 : issued <= issued_ns ? 3 :
+                        now < issued ? 4 : now - issued > 100000000 ? 5 : 0;
+    for (int i : {0, 1, 2, 3, 4, 7}) {
+      if (!std::isfinite(values[i])) {
+        submission.invalid_index = i;
+        if (!submission.reason)
+          submission.reason = 6;
+      }
+    }
+    if (!((std::isfinite(values[5]) && std::isfinite(values[6])) ||
+          (std::isnan(values[5]) && std::isnan(values[6])))) {
+      submission.invalid_index = 5;
+      if (!submission.reason)
+        submission.reason = 6;
+    }
+    if (submission.reason) {
       ++stats.rejected;
       has_command = false;
+      submission.completed_ns = qpc_ns();
+      rejection = submission;
       notify();
       return false;
     }
@@ -221,9 +269,20 @@ public:
     has_command = true;
     // New validated references publish immediately; no extra 50 ms IPC/timer
     // delay.
-    const bool result = publish_locked(command, false);
+    bool result;
+    try {
+      result = publish_locked(command, false, &submission);
+    } catch (const std::exception &error) {
+      last_error = error.what();
+      submission.reason = 8;
+      ++stats.rejected;
+      result = false;
+    }
+    submission.completed_ns = qpc_ns();
     if (!result)
       has_command = false;
+    if (!result)
+      rejection = submission;
     notify();
     return result;
   }
@@ -273,7 +332,7 @@ public:
   }
 };
 
-IC_API int ic_abi_version() { return 1; }
+IC_API int ic_abi_version() { return 2; }
 IC_API const char *ic_source_hash() { return IC_SOURCE_HASH; }
 IC_API const char *ic_error() { return last_error.c_str(); }
 IC_API void *ic_clock_new() { return new TrajectoryClock(); }
@@ -362,6 +421,11 @@ IC_API void ic_publisher_stats(ControlPublisher *publisher,
                                PublicationStats *out) {
   std::lock_guard<std::mutex> lock(publisher->mutex);
   *out = publisher->stats;
+}
+IC_API void ic_publisher_submission(ControlPublisher *publisher,
+                                    SubmissionState *out, int last_rejection) {
+  std::lock_guard<std::mutex> lock(publisher->mutex);
+  *out = last_rejection ? publisher->rejection : publisher->submission;
 }
 IC_API int ic_publisher_alive(ControlPublisher *publisher) {
   std::lock_guard<std::mutex> lock(publisher->mutex);

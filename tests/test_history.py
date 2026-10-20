@@ -18,18 +18,22 @@ from tools.recover_navigation_history import recover
 from navigation.flight_controls import FlightControls
 
 
+class HistorySnapshot(SimpleNamespace):
+    def fresh(self, now):
+        return True
+
+
 def snapshot():
     model = RayMap(resolution=0.2, size=20, origin=(-2.0, -2.0))
     model.grid[:] = FREE
     clearance, body_free, safe = model.geometry()
-    return SimpleNamespace(
+    return HistorySnapshot(
         model=model,
         pose=[0.0, 0.0, 0.0, 1.0],
         scans=3,
         stamp=100,
         reason="Observed map",
         valid=True,
-        fresh=lambda now: True,
         clearance=clearance,
         body_free=body_free,
         safe=safe,
@@ -49,6 +53,17 @@ def report(goal=None, phase="NAVIGATING", reason="Following route", simulation_s
 
 
 class HistoryTests(unittest.TestCase):
+    def test_process_writer_keeps_a_recording_error_after_later_success(self):
+        from navigation.report_jobs import HistoryProcessor
+
+        with tempfile.TemporaryDirectory() as folder:
+            writer = HistoryProcessor(Path(folder) / "history.jsonl", "test")
+            with patch.object(writer.history, "_write", side_effect=OSError("disk unavailable")):
+                with self.assertRaisesRegex(OSError, "disk unavailable"):
+                    writer(("event", "state", "failed write", {}))
+            summary, _ = writer(("event", "state", "later write", {}))
+            self.assertEqual(summary["error"], "disk unavailable")
+
     def test_explicit_flight_button_dispatches_once_and_keeps_command_receipt(self):
         hub = Dashboard(SimpleNamespace(get=lambda: (None, None)), Queue(), port=0)
         dispatched = []
@@ -176,7 +191,7 @@ class HistoryTests(unittest.TestCase):
                 self.assertIsNone(history.error)
                 ids = history.report()["frame_ids"]
                 self.assertEqual(len(ids), 90)
-                self.assertEqual(len(history.frames), 80)
+                self.assertEqual(len(history.report()["frames"]), 80)
                 self.assertEqual(history.frame(ids[0])["reason"], "Decision 0")
                 rows = [json.loads(line) for line in history.path.read_text().splitlines()]
                 self.assertEqual(sum(row["type"] == "frame" for row in rows), 90)

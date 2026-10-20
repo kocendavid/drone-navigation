@@ -290,9 +290,29 @@
       }
       .layout {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 355px;
+        grid-template-columns: minmax(0, 1.5fr) 300px minmax(350px, 1fr);
+        grid-template-areas:
+          "map controls profile"
+          "history history profile";
         gap: 14px;
         align-items: start;
+      }
+      .layout > .map {
+        grid-area: map;
+      }
+      .layout > .side {
+        grid-area: controls;
+      }
+      #flight-profile-panel {
+        grid-area: profile;
+        padding: 14px;
+      }
+      #flight-profile-frame {
+        display: block;
+        width: 100%;
+        height: 770px;
+        border: 0;
+        margin-top: 12px;
       }
       .map,
       .card {
@@ -517,11 +537,26 @@
         font-variant-numeric: tabular-nums;
       }
       .history-card {
-        margin-top: 14px;
+        grid-area: history;
       }
       .log-meta {
         color: var(--muted);
         font-size: 11px;
+      }
+      .log-filters {
+        margin-top: 10px;
+      }
+      #log-filter-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        margin: 10px 0;
+      }
+      #log-filter-options label {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 12px;
       }
       .event-log {
         list-style: none;
@@ -592,7 +627,7 @@
       }
       @media (min-width: 1500px) {
         .layout {
-          grid-template-columns: minmax(0, 1fr) 390px;
+          grid-template-columns: minmax(0, 1.5fr) 340px minmax(420px, 1fr);
         }
       }
       @media (max-width: 1150px) {
@@ -620,6 +655,10 @@
         }
         .layout {
           grid-template-columns: minmax(0, 1fr) 320px;
+          grid-template-areas:
+            "map controls"
+            "history history"
+            "profile profile";
         }
       }
       @media (max-width: 760px) {
@@ -634,6 +673,7 @@
         }
         .layout {
           grid-template-columns: 1fr;
+          grid-template-areas: "map" "controls" "history" "profile";
         }
         canvas {
           max-height: min(50vh, 390px);
@@ -991,46 +1031,65 @@
             </button>
           </section>
         </aside>
-      </div>
-      <section class="card history-card" aria-label="Combined target, decision and command log">
-        <div class="section-heading">
-          <h2>Event log</h2>
-          <span id="log-count" class="log-meta">Latest first · targets / decisions / commands</span>
-          <button id="log-live-view" class="primary" type="button" hidden>
-            Return to live map
-          </button>
-        </div>
-        <ol id="event-log" class="event-log" aria-label="Flight events, latest first">
-          <li class="log-empty">Waiting for events…</li>
-        </ol>
-        <details style="margin-top: 12px">
-          <summary>Map recording & replay</summary>
-          <div class="history-tools">
-            <label
-              >Run
-              <select id="history-source">
-                <option value="current">Current</option>
-                <option value="previous">Previous reset run</option>
-              </select></label
+        <section class="card" id="flight-profile-panel" aria-label="Live flight altitude and speed">
+          <h2>Altitude &amp; speed</h2>
+          <iframe
+            id="flight-profile-frame"
+            title="Live flight altitude and speed charts"
+            src="http://127.0.0.1:8788/"
+          ></iframe>
+        </section>
+        <section class="card history-card" aria-label="Combined target, decision and command log">
+          <div class="section-heading">
+            <h2>Event log</h2>
+            <span id="log-count" class="log-meta"
+              >Latest first · targets / decisions / commands</span
             >
-            <label><input id="show-trail" type="checkbox" checked /> Flown path</label
-            ><label><input id="show-targets" type="checkbox" checked /> Selected points</label
-            ><label><input id="show-rays" type="checkbox" /> LiDAR return endpoints</label>
-            <a id="download-history" href="/api/history/download" download>Download full log</a>
+            <button id="log-live-view" class="primary" type="button" hidden>
+              Return to live map
+            </button>
           </div>
-          <input
-            id="history-slider"
-            type="range"
-            min="0"
-            max="0"
-            value="0"
-            aria-label="Recorded map frame"
-          />
-          <p id="review-status">Live map. Select a recorded frame to review earlier decisions.</p>
-          <p id="frame-evidence" class="help"></p>
-          <p id="map-quality">Provisional LiDAR map.</p>
-        </details>
-      </section>
+          <p id="graph-event-hint" class="help">Hover an event to mark its time on the charts.</p>
+          <details class="log-filters">
+            <summary id="log-filter-summary">Filter event types</summary>
+            <p class="help">
+              Choose which events to show. Your selection is saved in this browser.
+            </p>
+            <div id="log-filter-options" aria-label="Visible event types"></div>
+            <button id="log-show-all" type="button">Show all event types</button>
+          </details>
+          <ol id="event-log" class="event-log" aria-label="Flight events, latest first">
+            <li class="log-empty">Waiting for events…</li>
+          </ol>
+          <details style="margin-top: 12px">
+            <summary>Map recording & replay</summary>
+            <div class="history-tools">
+              <label
+                >Run
+                <select id="history-source">
+                  <option value="current">Current</option>
+                  <option value="previous">Previous reset run</option>
+                </select></label
+              >
+              <label><input id="show-trail" type="checkbox" checked /> Flown path</label
+              ><label><input id="show-targets" type="checkbox" checked /> Selected points</label
+              ><label><input id="show-rays" type="checkbox" /> LiDAR return endpoints</label>
+              <a id="download-history" href="/api/history/download" download>Download full log</a>
+            </div>
+            <input
+              id="history-slider"
+              type="range"
+              min="0"
+              max="0"
+              value="0"
+              aria-label="Recorded map frame"
+            />
+            <p id="review-status">Live map. Select a recorded frame to review earlier decisions.</p>
+            <p id="frame-evidence" class="help"></p>
+            <p id="map-quality">Provisional LiDAR map.</p>
+          </details>
+        </section>
+      </div>
       <details class="card diagnostics">
         <summary>Exploration metrics & controller details</summary>
         <div class="diagnostic-grid">
@@ -1077,6 +1136,17 @@
       </details>
     </main>
     <script>
+      const profileFrame = document.getElementById("flight-profile-frame");
+      window.addEventListener("message", (event) => {
+        if (
+          event.source === profileFrame.contentWindow &&
+          event.origin === new URL(profileFrame.src).origin &&
+          event.data?.type === "flight-profile-height" &&
+          Number.isFinite(event.data.height)
+        ) {
+          profileFrame.style.height = Math.max(120, Math.min(2000, event.data.height)) + "px";
+        }
+      });
       let token = "__TOKEN__";
       const canvas = document.getElementById("map"),
         ctx = canvas.getContext("2d");
@@ -1109,6 +1179,160 @@
           ["sending", "received", "queued", "running"].includes(pendingRequest.status));
       const historyData = () =>
         replaySource === "previous" ? state?.previous_history : state?.history;
+      const graphEventRows = new Map(),
+        graphEventFrames = new Map();
+      let graphEventKey = null,
+        graphEventSequence = 0,
+        graphEventMessage = null;
+      function sendGraphEvent(message) {
+        graphEventMessage = message;
+        profileFrame.contentWindow.postMessage(
+          { type: "flight-profile-event", ...message },
+          new URL(profileFrame.src).origin,
+        );
+      }
+      profileFrame.addEventListener("load", () => {
+        if (graphEventMessage) sendGraphEvent(graphEventMessage);
+      });
+      function clearGraphEvent() {
+        if (graphEventKey === null) return;
+        graphEventKey = null;
+        ++graphEventSequence;
+        sendGraphEvent({ simulation_s: null });
+        byId("graph-event-hint").textContent = "Hover an event to mark its time on the charts.";
+      }
+      async function graphEventTime(row, history) {
+        if (Number.isFinite(row.source_simulation_s)) return { time: row.source_simulation_s };
+        let frameId = row.frame_id;
+        if (!frameId) {
+          const utc = Date.parse(row.utc);
+          const candidates = [
+            ...(history.frames || []).map((entry) => ({ ...entry, frame_id: entry.id })),
+            ...(history.events || []),
+            ...(history.targets || []),
+          ]
+            .map((entry) => ({
+              id: entry.frame_id,
+              distance: Math.abs(Date.parse(entry.utc) - utc),
+            }))
+            .filter(
+              (entry) => entry.id && Number.isFinite(entry.distance) && entry.distance <= 2000,
+            )
+            .sort((a, b) => a.distance - b.distance);
+          frameId = candidates[0]?.id;
+        }
+        if (frameId) {
+          const key = history.run_id + ":" + frameId;
+          if (!graphEventFrames.has(key)) {
+            const promise = fetch("/api/frame?id=" + encodeURIComponent(frameId), {
+              signal: AbortSignal.timeout(3000),
+            })
+              .then((response) => (response.ok ? response.json() : null))
+              .catch(() => null);
+            graphEventFrames.set(key, promise);
+            if (graphEventFrames.size > 200)
+              graphEventFrames.delete(graphEventFrames.keys().next().value);
+          }
+          const frame = await graphEventFrames.get(key);
+          const stamp = frame?.trajectory_clock?.source_stamp_ns;
+          if (frame?.run_id === history.run_id && Number.isFinite(stamp)) {
+            // Delivered elapsed time and the chart's source clock have different origins.
+            // An event's own frame supplies its exact source-time alignment.
+            return { time: stamp / 1e9, approximate: !row.frame_id };
+          }
+        }
+        const stamp = row.speed_decision?.tracking_alignment?.reference_sim_ns;
+        return Number.isFinite(stamp) ? { time: stamp / 1e9 } : null;
+      }
+      async function highlightGraphEvent(element) {
+        const row = graphEventRows.get(element?.dataset.logKey);
+        if (!row) return clearGraphEvent();
+        const history = historyData();
+        const key = replaySource + ":" + history?.run_id + ":" + row.id;
+        if (key === graphEventKey) return;
+        graphEventKey = key;
+        const sequence = ++graphEventSequence;
+        sendGraphEvent({ simulation_s: null });
+        if (replaySource !== "current") {
+          byId("graph-event-hint").textContent =
+            "The charts show the current recording; this event is from a previous run.";
+          return;
+        }
+        byId("graph-event-hint").textContent = "Locating event on the charts…";
+        const result = await graphEventTime(row, history);
+        if (sequence !== graphEventSequence || history.run_id !== historyData()?.run_id) return;
+        sendGraphEvent({
+          simulation_s: result?.time ?? null,
+          timestamp_utc: row.utc,
+          approximate: !!result?.approximate,
+        });
+        byId("graph-event-hint").textContent = result
+          ? "Chart marker · " +
+            logTime(row.utc) +
+            (result.approximate ? " · nearest recorded event time" : "")
+          : "This event has no recorded source timestamp to match with the charts.";
+      }
+      for (const type of ["pointerover", "pointermove", "focusin"])
+        byId("event-log").addEventListener(type, (event) =>
+          highlightGraphEvent(event.target.closest(".log-row")),
+        );
+      byId("event-log").addEventListener("pointerleave", clearGraphEvent);
+      byId("event-log").addEventListener("focusout", (event) => {
+        if (!byId("event-log").contains(event.relatedTarget)) clearGraphEvent();
+      });
+      const logFilterStorageKey = "isaac.flightConsole.hiddenLogKinds";
+      let hiddenLogKinds = new Set(["frontier_catalog_updated"]);
+      try {
+        const saved = JSON.parse(localStorage.getItem(logFilterStorageKey));
+        if (Array.isArray(saved))
+          hiddenLogKinds = new Set(saved.filter((kind) => typeof kind === "string"));
+      } catch {}
+      const logKind = (row) => row.kind || "other";
+      function saveLogFilters() {
+        try {
+          localStorage.setItem(logFilterStorageKey, JSON.stringify([...hiddenLogKinds]));
+        } catch {}
+        renderedHistory = null;
+        renderHistory();
+      }
+      function renderLogFilters(rows) {
+        const kinds = [...new Set([...rows.map(logKind), ...hiddenLogKinds])].sort();
+        const root = byId("log-filter-options");
+        const signature = JSON.stringify(kinds);
+        if (root.dataset.kinds !== signature) {
+          root.replaceChildren();
+          for (const kind of kinds) {
+            const label = document.createElement("label");
+            const input = document.createElement("input");
+            input.type = "checkbox";
+            input.value = kind;
+            input.onchange = () => {
+              if (input.checked) hiddenLogKinds.delete(kind);
+              else hiddenLogKinds.add(kind);
+              saveLogFilters();
+            };
+            label.append(
+              input,
+              kind === "frontier_catalog_updated"
+                ? "Frontier boundary updates"
+                : kind.replaceAll("_", " "),
+            );
+            if (kind === "frontier_catalog_updated")
+              label.title = "Fresh map updated frontier boundaries";
+            root.append(label);
+          }
+          root.dataset.kinds = signature;
+        }
+        for (const input of root.querySelectorAll("input"))
+          input.checked = !hiddenLogKinds.has(input.value);
+        byId("log-filter-summary").textContent =
+          "Filter event types" +
+          (hiddenLogKinds.size ? " · " + hiddenLogKinds.size + " hidden" : " · all shown");
+      }
+      byId("log-show-all").onclick = () => {
+        hiddenLogKinds.clear();
+        saveLogFilters();
+      };
       const activeStatuses = ["sending", "received", "queued", "running", "unconfirmed"];
       function loading(id, active) {
         byId(id).dataset.loading = String(!!active);
@@ -1625,6 +1849,7 @@
           history?.run_id,
           history?.events,
           history?.targets,
+          [...hiddenLogKinds].sort(),
         ]);
         if (version !== renderedHistory) {
           renderedHistory = version;
@@ -1642,8 +1867,13 @@
             (a, b) =>
               (Date.parse(b.utc) || 0) - (Date.parse(a.utc) || 0) || Number(b.id) - Number(a.id),
           );
+          renderLogFilters(rows);
+          const visibleRows = rows.filter((row) => !hiddenLogKinds.has(logKind(row)));
+          const hiddenCount = rows.length - visibleRows.length;
           const root = byId("event-log");
           const source = JSON.stringify([replaySource, history?.run_id]);
+          if (root.dataset.source !== source) clearGraphEvent();
+          graphEventRows.clear();
           const scrolled = root.dataset.source === source && root.scrollTop > 0;
           const top = scrolled ? root.getBoundingClientRect().top : 0;
           // Keep the entry being read at the same height, including partial rows.
@@ -1659,10 +1889,12 @@
             : [];
           root.replaceChildren();
           root.dataset.source = source;
-          for (const row of rows.slice(0, 160)) {
+          for (const row of visibleRows.slice(0, 160)) {
             const item = document.createElement("li");
             item.className = "log-row";
             item.dataset.logKey = String(row.id);
+            item.tabIndex = 0;
+            graphEventRows.set(String(row.id), row);
             const status = row.command?.status || row.target?.status || row.phase || row.kind;
             item.dataset.tone = /failed|rejected|expired|blocked|invalidated/i.test(status)
               ? "bad"
@@ -1711,11 +1943,12 @@
             }
             root.append(item);
           }
-          if (!rows.length) {
+          if (!visibleRows.length) {
             const empty = document.createElement("li");
             empty.className = "log-empty";
-            empty.textContent =
-              "No events in this run yet. Targets, decisions and command responses appear here.";
+            empty.textContent = rows.length
+              ? "All events are hidden by your filters. Select an event type above to show it."
+              : "No events in this run yet. Targets, decisions and command responses appear here.";
             root.append(empty);
           }
           if (scrolled) {
@@ -1732,8 +1965,16 @@
           } else {
             root.scrollTop = 0;
           }
+          const hoveredEvent = root.querySelector(".log-row:hover, .log-row:focus-within");
+          if (hoveredEvent) highlightGraphEvent(hoveredEvent);
+          else clearGraphEvent();
           byId("log-count").textContent = rows.length
-            ? "Latest first · " + Math.min(rows.length, 160) + " of " + rows.length + " events"
+            ? "Latest first · " +
+              Math.min(visibleRows.length, 160) +
+              " of " +
+              rows.length +
+              " events" +
+              (hiddenCount ? " · " + hiddenCount + " hidden" : "")
             : "Latest first";
         }
         if (history?.error || history?.dropped_records)

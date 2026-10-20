@@ -134,7 +134,7 @@ class BrakingHandoverTests(unittest.TestCase):
         for angle, expected in (
             (0, 1.2),
             (30, 1.2),
-            (31, 0.7),
+            (45, 0.95),  # Midpoint of the continuous 30–60 degree transition.
             (60, 0.7),
             (90, 0.7),
             (180, 0.7),

@@ -26,6 +26,9 @@ class MapFeedConcurrencyTests(unittest.TestCase):
             map_origin_y_m=0,
             map_resolution_m=0.2,
         )
+        from navigation.map_geometry import MapGeometry
+
+        feed.geometry = SimpleNamespace(call=MapGeometry(feed.settings))
         feed.lock = threading.Lock()
         feed.map_condition = threading.Condition(feed.lock)
         feed.pending_map = None
@@ -111,7 +114,7 @@ class MapFeedConcurrencyTests(unittest.TestCase):
         self.assertTrue(self.clock_read.wait(1), "Geometry blocked clock delivery")
 
     def test_stalled_geometry_does_not_block_clock_and_only_latest_pending_map_is_built(self):
-        with patch("navigation.feed.center_geometry", side_effect=self.slow_geometry):
+        with patch("navigation.map_geometry.center_geometry", side_effect=self.slow_geometry):
             self.start_threads()
             self.send_map(1)
             self.assertTrue(self.entered.wait(1))
@@ -149,7 +152,7 @@ class MapFeedConcurrencyTests(unittest.TestCase):
             self.assertFalse(self.feed.trajectory_clock.fresh(100.601))
 
     def test_eof_during_geometry_latches_failure_and_rejects_late_result(self):
-        with patch("navigation.feed.center_geometry", side_effect=self.slow_geometry):
+        with patch("navigation.map_geometry.center_geometry", side_effect=self.slow_geometry):
             self.start_threads()
             self.send_map(1)
             self.assertTrue(self.entered.wait(1))
@@ -169,7 +172,7 @@ class MapFeedConcurrencyTests(unittest.TestCase):
             self.release.wait(2)
             raise RuntimeError("Synthetic geometry failure")
 
-        with patch("navigation.feed.center_geometry", side_effect=fail_geometry):
+        with patch("navigation.map_geometry.center_geometry", side_effect=fail_geometry):
             self.start_threads()
             self.send_map(1)
             self.assertTrue(self.entered.wait(1))

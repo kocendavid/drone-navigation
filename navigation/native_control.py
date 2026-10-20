@@ -81,6 +81,49 @@ class PublicationStats(C.Structure):
     _fields_ = [(name, C.c_uint64) for name in ("published", "expired", "rejected", "repeats")]
 
 
+class SubmissionState(C.Structure):
+    _fields_ = [
+        (name, C.c_int64)
+        for name in (
+            "issued_ns",
+            "entered_ns",
+            "validated_ns",
+            "completed_ns",
+            "previous_issued_ns",
+            "graph_ns",
+            "publish_ns",
+            "reason",
+            "invalid_index",
+            "mode_publishers",
+            "target_publishers",
+        )
+    ]
+
+
+SUBMISSION_REASONS = (
+    "accepted",
+    "publisher_stopped",
+    "benchmark_active",
+    "out_of_order_command",
+    "future_command",
+    "stale_command",
+    "invalid_frame",
+    "competing_publisher",
+    "publication_error",
+)
+
+
+class NativeSubmissionError(RuntimeError):
+    def __init__(self, submission, detail=None):
+        self.submission = submission
+        super().__init__(
+            f"Native publisher rejected {submission['reason']}; publication stopped "
+            f"(command age {submission['command_age_s'] * 1000:.1f} ms, "
+            f"native lock wait {submission['lock_wait_s'] * 1000:.1f} ms)"
+            + (f": {detail}" if detail else "")
+        )
+
+
 @lru_cache(maxsize=1)
 def library():
     if not LIBRARY_PATH.exists():
@@ -133,6 +176,7 @@ def library():
         "ic_publisher_revoke": (None, [pointer]),
         "ic_publisher_readers": (C.c_size_t, [pointer, C.c_int]),
         "ic_publisher_stats": (None, [pointer, C.POINTER(PublicationStats)]),
+        "ic_publisher_submission": (None, [pointer, C.POINTER(SubmissionState), C.c_int]),
         "ic_publisher_alive": (C.c_int, [pointer]),
         "ic_publisher_benchmark": (i64, [pointer, C.c_size_t]),
         "ic_publisher_benchmark_count": (C.c_size_t, [pointer]),
@@ -142,7 +186,7 @@ def library():
     for name, (result, arguments) in signatures.items():
         function = getattr(dll, name)
         function.restype, function.argtypes = result, arguments
-    if dll.ic_abi_version() != 1 or dll.ic_source_hash().decode() != source_hash():
+    if dll.ic_abi_version() != 2 or dll.ic_source_hash().decode() != source_hash():
         raise RuntimeError(
             "Native control build is stale; rebuild with tools/build_native_control.cmd."
         )
@@ -344,10 +388,40 @@ class NativePublisher(NativeHandle):
         self._frame[:] = (*position, *velocity, *acceleration, yaw)
         issued_ns = time.perf_counter_ns() if issued_ns is None else issued_ns
         result = self.dll.ic_publisher_submit(self.handle, self._frame, issued_ns)
+        self.last_submission = self.submission_report()
         if result != 1:
-            raise RuntimeError(
-                "Native publisher rejected a stale, invalid or conflicting command; publication stopped"
+            detail = (
+                self.dll.ic_error().decode()
+                if self.last_submission["reason"] == "publication_error"
+                else None
             )
+            raise NativeSubmissionError(self.last_submission, detail)
+
+    def submission_report(self, last_rejection=False):
+        state = SubmissionState()
+        self.dll.ic_publisher_submission(self.handle, C.byref(state), int(last_rejection))
+        if not state.entered_ns:
+            return None
+        return dict(
+            reason=SUBMISSION_REASONS[state.reason],
+            issued_qpc_ns=state.issued_ns,
+            entered_qpc_ns=state.entered_ns,
+            previous_issued_qpc_ns=state.previous_issued_ns,
+            command_age_s=(state.validated_ns - state.issued_ns) / 1e9,
+            python_before_native_s=(state.entered_ns - state.issued_ns) / 1e9,
+            lock_wait_s=(state.validated_ns - state.entered_ns) / 1e9,
+            graph_s=state.graph_ns / 1e9,
+            publish_s=state.publish_ns / 1e9,
+            completion_age_s=(state.completed_ns - state.issued_ns) / 1e9,
+            invalid_index=state.invalid_index,
+            invalid_field=(
+                ("x", "y", "z", "vx", "vy", "ax/ay", "ax/ay", "yaw")[state.invalid_index]
+                if state.invalid_index >= 0
+                else None
+            ),
+            mode_publishers=state.mode_publishers,
+            target_publishers=state.target_publishers,
+        )
 
     def revoke(self):
         self.dll.ic_publisher_revoke(self.handle)
@@ -359,6 +433,7 @@ class NativePublisher(NativeHandle):
             backend="cpp",
             running=bool(self.dll.ic_publisher_alive(self.handle)),
             lease_s=0.1,
+            last_rejection=self.submission_report(last_rejection=True),
             **{name: getattr(stats, name) for name, _ in stats._fields_},
         )
 

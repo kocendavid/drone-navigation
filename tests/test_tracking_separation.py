@@ -22,7 +22,7 @@ from test_navigation import snapshot, navigator_fixture
 
 class TrackingSeparationTests(unittest.TestCase):
     def analyzed_frontiers(self, node, snap):
-        ledger = AsyncFrontiers()
+        ledger = AsyncFrontiers(worker_factory=LatestWorker)
         self.addCleanup(ledger.close)
         node.exploration.frontier_ledger = ledger
         ledger.observe_map(snap)
@@ -244,7 +244,7 @@ class TrackingSeparationTests(unittest.TestCase):
             threading.Event(),
             threading.Event(),
         )
-        ledger = AsyncFrontiers()
+        ledger = AsyncFrontiers(worker_factory=LatestWorker)
         self.addCleanup(ledger.close)
         self.addCleanup(release.set)
         analyze = ledger.worker.handler
@@ -298,7 +298,7 @@ class TrackingSeparationTests(unittest.TestCase):
         self.assertEqual(pending[0][1]["message"], "Queued notice")
 
     def test_frontier_analysis_failure_is_exposed_instead_of_a_successful_empty_catalog(self):
-        ledger = AsyncFrontiers()
+        ledger = AsyncFrontiers(worker_factory=LatestWorker)
         self.addCleanup(ledger.close)
         ledger.worker.handler = lambda snap: (_ for _ in ()).throw(ValueError("analysis failed"))
         ledger.observe_map(snapshot())
@@ -310,7 +310,7 @@ class TrackingSeparationTests(unittest.TestCase):
     def test_frontier_results_require_current_stamp_and_retain_real_resolution_evidence(self):
         from test_frontier_ledger import maze
 
-        ledger = AsyncFrontiers()
+        ledger = AsyncFrontiers(worker_factory=LatestWorker)
         self.addCleanup(ledger.close)
         snap = maze()
 

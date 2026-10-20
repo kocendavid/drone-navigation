@@ -3,7 +3,7 @@
 import math
 import numpy as np
 from .settings import NavigationSettings
-from .curves import speed_profile
+from .curves import speed_profile, corner_geometry
 from .braking import stopping_envelope
 
 
@@ -36,6 +36,14 @@ def braking_speed(distance, stop, deceleration, reaction_s):
         * margin
         / (math.sqrt(reaction_term**2 + 2 * deceleration * margin) + reaction_term)
     )
+
+
+def yaw_speed_limit(error, cruise, misaligned_speed):
+    """Blend the facing-speed policy from 30 to 60 degrees without a step."""
+    angle = abs(math.remainder(error, 2 * math.pi))
+    blend = float(np.clip((angle - math.radians(30)) / math.radians(30), 0, 1))
+    blend = blend * blend * (3 - 2 * blend)
+    return cruise + (min(cruise, misaligned_speed) - cruise) * blend
 
 
 def clearance_ahead(pose, direction, hits, half_width=0.45):
@@ -362,10 +370,26 @@ class RouteFollower:
         # sample) is not a major turn. Keep the final goal and true onward turns
         # subject to the normal stopping, footprint and acceleration checks.
         if self.braking_envelope is None:
-            while (
-                self.index < len(self.path) - 1
-                and np.linalg.norm(self.path[self.index] - self.target) < 0.05
-            ):
+            while self.index < len(self.path) - 1:
+                sample = self.path[self.index]
+                segment = sample - self.path[self.index - 1]
+                length = float(np.linalg.norm(segment))
+                passed = length > 1e-8 and float((self.target - sample) @ segment) >= 0
+                # Dense curve samples describe geometry, not a command to
+                # discard the rest of a control interval at every vertex.
+                delta = self.target - sample
+                cross = (
+                    abs(float(segment[0] * delta[1] - segment[1] * delta[0])) / length
+                    if length > 1e-8
+                    else 0.0
+                )
+                if not (
+                    np.linalg.norm(sample - self.target) < 0.05
+                    or passed
+                    and cross <= 0.05
+                    and self.limits[self.index] > self.settings.turn_speed_m_s
+                ):
+                    break
                 self.index += 1
         # Live handovers have a measured velocity vector and a complete stopping
         # envelope checker. Decide to brake BEFORE the scalar tracking latch or
@@ -443,27 +467,33 @@ class RouteFollower:
         self.speed_decision.update(
             distance_to_waypoint_m=float(remaining), waypoint_exit_speed_m_s=float(exit_speed)
         )
+        if self.index < len(self.path) - 1:
+            angle, curvature = corner_geometry(self.path, self.index)
+            self.speed_decision.update(
+                waypoint_turn_deg=math.degrees(angle),
+                effective_turn_radius_m=(1 / curvature if 0 < curvature < math.inf else None),
+            )
         if exit_speed <= 1e-8:
             cap = self._speed_cap(
                 "goal_braking" if self.index == len(self.path) - 1 else "corner_braking",
                 braking_speed(remaining, 0.01, cfg.acceleration_m_s2, cfg.braking_reaction_s),
                 cap,
             )
-            if self.index < len(self.path) - 1:
-                cap = self._speed_cap(
-                    "corner_approach",
-                    max(
-                        cfg.turn_speed_m_s,
-                        braking_speed(
-                            remaining, 0.4, cfg.acceleration_m_s2, cfg.braking_reaction_s
-                        ),
-                    ),
-                    cap,
-                )
         else:
             cap = self._speed_cap(
                 "route_profile",
                 math.sqrt(exit_speed**2 + 2 * 0.6 * cfg.acceleration_m_s2 * remaining),
+                cap,
+            )
+        if self.index < len(self.path) - 1 and exit_speed <= cfg.turn_speed_m_s:
+            # Retain the conservative approach zone for unresolved tight
+            # corners even though their continuous limit is no longer zero.
+            cap = self._speed_cap(
+                "corner_approach",
+                max(
+                    cfg.turn_speed_m_s,
+                    braking_speed(remaining, 0.4, cfg.acceleration_m_s2, cfg.braking_reaction_s),
+                ),
                 cap,
             )
         direction = vector / remaining if remaining > 1e-8 else np.zeros(2)
@@ -526,7 +556,11 @@ class RouteFollower:
             angle = abs(math.remainder(heading_error, 2 * math.pi))
             yaw_limited = angle > math.radians(30)
             if yaw_limited:
-                cap = self._speed_cap("yaw", cfg.yaw_misaligned_speed_m_s, cap)
+                cap = self._speed_cap(
+                    "yaw",
+                    yaw_speed_limit(heading_error, cruise_cap, cfg.yaw_misaligned_speed_m_s),
+                    cap,
+                )
         previous_speed = float(np.linalg.norm(self.velocity))
         actual_speed = previous_speed if measured_speed is None else measured_speed
         if not math.isfinite(actual_speed) or actual_speed < 0:
@@ -597,7 +631,9 @@ class RouteFollower:
         self.speed_decision["lead_clamped"] = bool(speed * dt > headroom + 1e-9)
         # Only clamp to the waypoint when moving toward it, not while braking
         # in the old direction after a route switch.
-        if float(travel_direction @ direction) > 0.99:
+        if float(travel_direction @ direction) > 0.99 and (
+            self.index == len(self.path) - 1 or self.limits[self.index] <= cfg.turn_speed_m_s
+        ):
             self.speed_decision["waypoint_clamped"] = bool(travel > remaining + 1e-9)
             travel = min(travel, remaining)
         candidate = self.target + travel_direction * travel
@@ -725,7 +761,10 @@ class RouteFollower:
         if self.braking_envelope is not None:
             return self.goal - self.target
         # Look along the upcoming curve rather than chasing each dense sample.
-        distance = max(0.3, min(0.8, self.speed * 0.5))
+        # smooth_yaw's proportional response has a ~0.5 s time constant;
+        # a chord one second ahead approximates the tangent half a second
+        # ahead and compensates that lag during a steady bend.
+        distance = max(0.3, min(3.0, self.speed * 1.0))
         point = self.target
         for next_point in self.path[self.index :]:
             length = float(np.linalg.norm(next_point - point))

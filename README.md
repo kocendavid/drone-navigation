@@ -132,12 +132,15 @@ displayed centerlines directly. The center term now guides both A* and shortcut
 selection. This can select a longer, wider corridor. It is a preference, not a rule that
 every point must lie on a center ridge: endpoints, narrow passages and the
 existing near-wall start escape still need to connect. Shortcutting preserves
-the combined center/clearance objective within a 2% cost tolerance and retains all hard
-observed-space/footprint checks. Exploration, manual routes, previews and
+the combined center/clearance objective while comparing several shortcut and
+rounding candidates by estimated flight time, speed variation and clearance cost.
+The selected route may spend at most 5% more center/clearance cost than the
+conservative 2% shortcut baseline. All hard observed-space/footprint checks remain.
+Exploration, manual routes, previews and
 Return to start share this planner. Frontier ranking still uses geometric
 reachability distance, so its reported metres are not weighted route cost.
 During exploration, each fresh-map reconsideration can also update the route
-to the same destination when its combined center/clearance cost improves by
+to the same destination when its combined motion/clearance score improves by
 at least 5%. This is recorded as `route_recentered`, without counting a new
 destination. It avoids retaining an edge-following route solely because its
 frontier is still useful as more of the corridor becomes known.
@@ -162,15 +165,18 @@ measured motion to settle, then plans a fresh route through currently observed
 clear space. It uses A* with no diagonal corner cutting, then removes redundant
 waypoints only where a straight segment preserves the obstacle margin. The
 usual speed/braking limits, smooth yaw and live map/LiDAR checks remain active.
-If no safe mapped route exists, it holds as BLOCKED; it never invents a passage
-or reports a successful return. Home arrival requires the measured position to
+New obstacles trigger the same stop/replan/resume behavior as every other planned
+route, retaining home as the destination. If no safe mapped route exists, it holds
+as BLOCKED and retries; it never invents a passage or reports a successful return.
+Home arrival requires the measured position to
 remain within 0.15 m at a stable hover for one simulated second. Use **Land here**
 separately if you want to land.
 
 Because the return planner uses the accumulated map rather than replaying the
 outbound travel history, it can skip exploration detours and use known
 shortcuts between connected rooms. A* minimizes distance weighted by clearance;
-shortcutting reduces unnecessary bends while preserving that preference. This is not a guarantee of the mathematically
+candidate scoring then favors gentler, faster routes within a bounded clearance
+tradeoff. This is not a guarantee of the mathematically
 shortest continuous route or fastest flight: clearance, turns, acceleration and
 new obstacles still affect the result. Unknown space remains excluded even if
 it would make a shorter path. Home capture, its selected goal, route changes,
@@ -433,6 +439,19 @@ the complete remaining route with an observed vehicle footprint. Missing
 endpoints alone never certify free space. A real close obstacle still overrides
 the map and stops the reference.
 
+For every planned route (manual goal, exploration or return home), a newly detected
+obstacle that invalidates the remaining route triggers a hold and a request for a
+replacement route against the latest map. Planning waits for measured motion to
+settle. Navigation automatically resumes when the replacement passes the current
+observed-space and obstacle-clearance checks. An unreachable manual/home goal
+remains BLOCKED and retries at most once every two wall seconds; exploration can
+retire an unreachable frontier and select another from the updated map.
+A temporary map or simulation-clock gap with an active goal also holds; automatic
+replanning requires three fresh aligned scans over at least one simulated second
+at a stable hover with healthy telemetry and clocks. Operator Hold cancels the
+route; tracking, alignment, position and control-callback faults require manual
+intervention.
+
 The earlier gain-per-route-length policy favored short moves. This experiment
 now uses the furthest-frontier policy requested during the lesson.
 
@@ -583,10 +602,12 @@ Starting the program never arms or takes off. Explicit dashboard flight buttons
 can request native takeoff, Offboard and landing. The explore-and-land mission requests native
 PX4 Land after confirmed completion and successful map persistence.
 
-During navigation the nose follows the current planned route segment, with a
+During navigation the nose anticipates the upcoming route curve, with a
 60°/s yaw-rate limit and 90°/s² reference acceleration. At major direction changes,
 it brakes toward near-hover while yawing, then accelerates once both measured and
-reference speed are at most 0.15 m/s and measured heading error is within 30°.
+reference speed are at most 0.15 m/s. Translation can resume while yaw catches up:
+the facing-speed cap blends continuously from cruise at 30° misalignment to
+0.7 m/s at 60° and above (bounded by the configured cruise).
 The shortest angular error handles ±180° wrap. Captured estimator heading bias
 corrects the yaw target independently of the world/NED position-axis conversion.
 Hold, blocked/settled phases, stale maps and timing faults freeze the heading
@@ -820,7 +841,7 @@ does not establish exact source-time synchronization or hide localization errors
 | Reference acceleration / bend speed cap                   | 0.25 m/s² / 0.15 m/s                                        |
 | Braking reaction allowance                                | 0.50 simulated seconds                                      |
 | Yaw rate / yaw acceleration                               | 60°/s / 90°/s²                                              |
-| Heading error above 30°                                   | Travel cap 0.70 m/s; heading alone does not request a stop   |
+| Heading error above 30°                                   | Travel cap 0.70 m/s; heading alone does not request a stop  |
 | Major travel-direction change / replan launch             | Brake to stopped reference / stable hover ≤0.10 m/s         |
 | Lead / proactive tracking braking / warning               | 0.28 m / 0.25 m / 0.35 m; certified braking may exceed lead |
 | Preferred obstacle margin / assumed vehicle radius        | 0.80 m / 0.30 m                                             |
@@ -850,6 +871,16 @@ stopping policy below governs tracking and lead-limit interventions. This kinema
 does not establish PX4's measured stopping distance or guarantee cruise speed
 in a short corridor. Acceleration alone needs 4.8 simulated seconds to
 reach 1.2 m/s from rest. Goal, bend, tracking and yaw caps can reduce it further.
+
+Turn speed now follows effective curvature rather than stopping at a 12°
+waypoint-angle threshold. The 0.15 m/s² lateral budget requires a 9.6 m radius
+to retain 1.2 m/s; a long 90° arc can therefore be faster than a short 15° kink.
+Rounding seeks that radius within observed safe space. Replanning can blend a
+new tail tangent to the immutable committed prefix, and intermediate curve
+samples no longer clip a longer control step to one sample's distance.
+The [turn-speed investigation](docs/TURN_SPEED.txt) records the formulas,
+remaining handover guards and reproducible offline sweep. The new behavior
+still needs a moving PX4/Isaac flight evaluation after navigator reload.
 
 The navigator now sends finite horizontal **velocity feedforward** equal to the
 validated position reference's actual advance per simulated second. Position
@@ -1441,15 +1472,19 @@ retain their capture times. Workers have bounded pending input and cannot publis
 late results after shutdown. The follower and its mutable control state still
 have one owner; background workers cannot publish flight targets or change mode.
 
-`navigation/background.py`, `navigation/async_frontiers.py` and
-`navigation/prepared_route.py` implement this separation. Diagnostics record
-background work duration, superseded inputs and position receipt age. This is
-thread-based scheduling isolation, not a real-time guarantee. Scheduling isolation
-alone left the clamp/acceleration conflict unchanged. The subsequent certified
-braking change described above addresses that conflict without changing PX4 gains.
+`navigation/process_worker.py` isolates frontier analysis, route selection and
+reconsideration, map geometry, ROS visualization, dashboard JSON/route previews,
+and history/report serialization in separate processes. On Windows these workers
+run below normal priority; numerical libraries use one thread per worker. Small
+relay threads transfer immutable snapshots and completed results. The flight
+callback never waits for a worker response. Map/frontier/report queues retain
+only the newest pending input; history retains its bounded recording queue.
+The follower remains owned by the control callback, and new routes still pass
+current-map and generation checks. Process isolation removes competition for the
+controller's Python execution lock; host CPU scheduling and IPC still have costs.
 
 Clock records are consumed by a dedicated pipe reader. Map clearance and center
-geometry are built on a separate thread, with just the newest cumulative map
+geometry are built in a separate process, with just the newest cumulative map
 snapshot waiting for processing. This prevents a slow geometry calculation from
 holding clock records in the pipe. Scan integration and wall confirmation still
 happen upstream in the mapper; discarding an intermediate publication does not
@@ -1459,6 +1494,31 @@ force. Pipe closure or a processing error revokes readiness; a calculation
 finishing afterward cannot clear that failure. This isolates geometry work, but
 does not guarantee that upstream ROS clock delivery or host scheduling is timely.
 
+Each callback emits a `control_timing` record, including early returns and rejected
+commands. Its named stages record elapsed wall time and CPU time on the control
+thread. `callback_gap_s` and `scheduling_delay_s` use QPC, rather than the coarser
+Windows monotonic clock. `off_cpu_s` is elapsed time minus this thread's CPU time;
+it includes waiting and preemption and does not identify an OS scheduling cause
+by itself. Worker `background_started`/`background_work` events include matching
+job IDs, process IDs, wall duration and CPU duration for correlation.
+
+Native submission diagnostics separately record command age, Python time before
+entering C++, mutex wait, ROS graph-check time and publish time. Rejections identify
+stale, future, out-of-order, invalid-frame, competing-publisher, stopped-publisher,
+benchmark or publication-error causes. The most recent rejection persists in
+`native_publisher.last_rejection` after successful hold commands. A rejected
+callback emits `control_rejection` before its stop event; the stop embeds those
+timings so its incident retains them even if another diagnostic packet drops.
+Incident summaries include per-stage statistics, rejection details and deadline
+misses. A late callback following a published command or an over-budget native
+publication also emits `deadline_miss` and saves an incident window, even when
+the new command itself was accepted. The 100 ms command lease remains enforced, including after graph lookup;
+an over-budget command is never made fresh by changing its timestamp.
+
+Build the updated native library with `tools/build_native_control.cmd` inside the
+Pixi ROS environment. Changes load at the next navigator restart or successful
+ground Reset; an already-running flight continues using its loaded code/library.
+
 The passive `diagnostics` service starts automatically with the navigator and
 survives a navigator restart or failed Reset. It never publishes flight commands.
 The dashboard's **Controller & clearance → Timestamped diagnostics** panel shows
@@ -1466,6 +1526,56 @@ recording health, aligned error statistics, and download links. A pause saves a
 10-second pre-event and 2-second post-event window under `logs/timing_*/`.
 Continuous records remain in `events.jsonl`; dropped records and sequence gaps
 are reported, so incomplete recordings cannot masquerade as complete evidence.
+
+The recorder also writes `flight_profiles/flight_<bridge-session>_<part>.csv`,
+with one instantaneous sample at each integer **Isaac simulation second**.
+Columns include a UTC Unix capture timestamp, simulator height, PX4 estimated height, received commanded
+height, actual and estimated horizontal speed, expected reference speed,
+selected speed ceiling, cruise speed, vertical speeds, phase and slowdown reason.
+"Expected" speed describes the navigator reference; it is not an aircraft
+response prediction. "Estimated" height is PX4's estimate, not a separate model.
+Height comparisons use the configured mapping floor. PX4's world height origin
+is calibrated from disarmed, source-aligned observations; starting a recording
+airborne leaves that comparison unavailable rather than guessing an offset.
+Raw PX4 local height is retained separately. Missing samples stay blank;
+interpolation is bounded to 0.2 s, references/setpoints to 0.25 s age, and resets
+start separate profiles. Two simulation seconds of buffering allow late streams.
+
+To graph an existing recording, or passively follow the current recorder with
+interactive charts that update as simulation-time samples are captured:
+
+```text
+python tools/record_flight_profile.py logs/timing_<run>/events.jsonl
+python tools/record_flight_profile.py --latest-run --follow
+python tools/record_flight_profile.py --plot-csv logs/flight_profiles/flight_<session>_0.csv
+```
+
+Outputs default to `logs/flight_profiles/`: CSV, metadata JSON, a whole-flight
+PNG and a navigation-detail PNG including the pause and following 12 seconds.
+The live follower writes `status.json` with current output paths. Use `--floor-z`
+when the recording used a floor different from `config/navigation_settings.json`.
+This tool only reads the existing recording; it never commands a flight.
+CSV recording and the live viewer use the Python standard library. Offline PNG
+exports (including the final export on shutdown) also need `matplotlib`.
+
+The dashboard places **Altitude & speed** in the third column beside the map
+and navigation controls, stacking below them on narrower screens. Locally bundled
+uPlot 1.6.32 charts provide shared hover values, legend toggles, and drag zoom;
+hover labels and time axes show capture date/time in Europe/Prague. Clock pairs
+saved with the recording preserve time-of-day through slow simulation and pauses.
+hovering or focusing an event in the log marks its source-aligned time on both
+charts, with dots on the nearest available samples. Events without their own
+frame use a nearby recorded frame when available, labelled as approximate.
+Event marker labels show the event's recorded date/time.
+**Follow live** or a double-click resets zoom. Select **Navigation & pause** or
+**Full flight**, expand the charts, or download the CSV. Captured samples stream
+to the browser over server-sent events without waiting for PNG rendering or a
+five-second timer. The existing two simulation seconds of source-alignment
+buffering still apply. The passive follower serves this viewer
+at `http://127.0.0.1:8788/`; it can update while the navigator keeps running.
+`tools/lab.ps1 start navigator` and `start all` also start/reuse the `profile`
+service. Start only the recorder/viewer with `tools/lab.ps1 start profile`.
+An existing dashboard page needs a browser refresh to show the new panel.
 
 - `navigation/diagnostic_wire.py`: bounded, nonblocking localhost observations.
 - `tools/record_timing.py`: independent recorder, incident windows and summaries.
@@ -1566,8 +1676,12 @@ above the map. Hover or focus an indicator for its readiness details. Flight,
 navigation, Hold, Land and recovery controls share the Navigation panel. Loading
 indicators identify pending commands, route planning, replay and reset work;
 stale telemetry and lost connections cannot retain healthy state indicators.
-The full-width event log merges targets, decisions and command responses, with
-local 24-hour timestamps and links to recorded map frames. Map replay and
+The event log spans the map and navigation columns beneath them, merging targets,
+decisions and command responses, with
+local 24-hour timestamps and links to recorded map frames. **Filter event types**
+lets you hide categories; frontier boundary updates are hidden by default.
+Selections persist in this browser, and **Show all event types** restores them.
+Filtering only changes the display; the recorded log retains every event. Map replay and
 controller diagnostics are available in expandable sections.
 
 Thirty-one isolated JavaScript interaction checks run with

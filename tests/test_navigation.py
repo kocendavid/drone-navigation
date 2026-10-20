@@ -408,7 +408,7 @@ class MotionTests(unittest.TestCase):
         self.assertIn("yaw aligns", follower.reason)
         for _ in range(240):
             follower.tick(
-                0.05, follower.target.copy(), np.array([[100, 0]]), heading_error=math.radians(40)
+                0.05, follower.target.copy(), np.array([[100, 0]]), heading_error=math.radians(60)
             )
         slow_speed = follower.speed
         self.assertAlmostEqual(slow_speed, 0.7)
@@ -742,6 +742,9 @@ def navigator_fixture():
     node.plan_thread = None
     node.last_report = 100.0
     node.exploration = ExplorationSession()
+    from navigation.planning_jobs import PlanningJobs
+
+    node.planning = node.replanning = SimpleNamespace(call=PlanningJobs())
     node.reconsider_thread = None
     node.reconsider_results = Queue()
     node.reconsider_mark = None
@@ -813,7 +816,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(node.follower.phase, "PLANNING")
             self.assertIsNone(node.plan_thread)
             node.position.vx = -0.09
-            with patch("ros2_navigate.plan", return_value=[[2, 3], [2, 4]]):
+            with patch("navigation.planning_jobs.plan", return_value=[[2, 3], [2, 4]]):
                 node.pacer.total_s += 0.05
                 GoalNavigator.publish_target(node)
                 node.plan_thread.join(timeout=2)
@@ -1025,6 +1028,168 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(node.returning_home)
         np.testing.assert_allclose(node.target_goal, [2, 2])
         np.testing.assert_allclose(node.home_world_xy, [1, 2])
+
+    def test_active_route_replans_around_new_obstacle_and_retries_if_no_route_exists(self):
+        from navigation.prepared_route import route_safe
+
+        for mode, unreachable in (
+            ("goal", False),
+            ("goal", True),
+            ("home", False),
+            ("home", True),
+            ("explore", False),
+        ):
+            with self.subTest(mode=mode, unreachable=unreachable):
+                node, _, targets, _ = navigator_fixture()
+                snap = node.feed.get()[0]
+                node.home_world_xy = np.array([-3.0, 3.0])
+                node.target_goal = node.home_world_xy.copy()
+                node.returning_home = mode == "home"
+                if mode == "explore":
+                    node.exploration.start(snap, continuous=False)
+                    node.exploration.phase = "TRAVELLING"
+                node.follower.begin([node.world_pose, node.home_world_xy])
+                y, x = snap.model.cell([0, 3])
+                if unreachable:
+                    snap.model.grid[:, x] = OCCUPIED
+                else:
+                    snap.model.grid[y - 2 : y + 3, x - 2 : x + 3] = OCCUPIED
+                snap.clearance, snap.body_free, snap.safe = snap.model.geometry()
+                snap.scans += 1
+                self.assertFalse(route_safe(snap, node.follower.path))
+                node.last_retry = 97.0
+                with patch("ros2_navigate.time.monotonic", return_value=100.0):
+                    GoalNavigator.publish_target(node)
+                    self.assertEqual(node.follower.phase, "BLOCKED")
+                    np.testing.assert_allclose(targets[-1].velocity[:2], [0, 0])
+                    # Do not start a new route until measured motion settles.
+                    node.position.vx = 0.2
+                    GoalNavigator.publish_target(node)
+                    self.assertIsNone(node.plan_thread)
+                    node.position.vx = 0
+                    GoalNavigator.publish_target(node)
+                    node.plan_thread.join(5)
+                    self.assertFalse(node.plan_thread.is_alive())
+                    GoalNavigator.publish_target(node)
+                    if unreachable:
+                        self.assertEqual(node.follower.phase, "BLOCKED")
+                        previous_thread = node.plan_thread
+                        GoalNavigator.publish_target(node)
+                        self.assertIs(node.plan_thread, previous_thread)
+                        node.last_retry = 97.0
+                        GoalNavigator.publish_target(node)
+                        self.assertIsNot(node.plan_thread, previous_thread)
+                        node.plan_thread.join(5)
+                        GoalNavigator.publish_target(node)
+                        self.assertEqual(node.follower.phase, "BLOCKED")
+                        np.testing.assert_allclose(targets[-1].velocity[:2], [0, 0])
+                    else:
+                        self.assertEqual(node.follower.phase, "NAVIGATING")
+                        self.assertTrue(route_safe(snap, node.follower.path))
+                        self.assertGreater(len(node.follower.path), 2)
+                np.testing.assert_allclose(node.target_goal, node.home_world_xy)
+                self.assertEqual(node.returning_home, mode == "home")
+
+    def test_active_route_recovers_input_gap_and_plans_from_latest_observed_map(self):
+        from navigation.prepared_route import route_safe
+        from itertools import product
+
+        for mode, gap in product(("goal", "home", "explore"), ("map", "clock")):
+            with self.subTest(mode=mode, gap=gap):
+                node, _, targets, _ = navigator_fixture()
+                snap = node.feed.get()[0]
+                node.home_world_xy = np.array([-3.0, 3.0])
+                node.target_goal = node.home_world_xy.copy()
+                node.returning_home = mode == "home"
+                if mode == "explore":
+                    node.exploration.start(snap, continuous=False)
+                    node.exploration.phase = "TRAVELLING"
+                command = dict(action=mode, request_id="route")
+                node.active_ui_command = command
+                node.follower.begin([node.world_pose, node.home_world_xy])
+                node.stop("New obstacle; waiting to replan", "BLOCKED")
+                if gap == "map":
+                    snap.cloud_wall = 98.9
+                else:
+                    node.trajectory_clock.consume = lambda now: None
+                    node.trajectory_clock.fresh = lambda now: False
+                with patch("ros2_navigate.time.monotonic", return_value=100.0):
+                    GoalNavigator.publish_target(node)
+                    self.assertEqual(node.follower.phase, "PAUSED")
+                    self.assertTrue(node.auto_recover)
+                    self.assertIsNone(node.plan_thread)
+                    # Map updates while paused must affect the replacement route.
+                    y, x = snap.model.cell([0, 3])
+                    snap.model.grid[y - 2 : y + 3, x - 2 : x + 3] = OCCUPIED
+                    snap.clearance, snap.body_free, snap.safe = snap.model.geometry()
+                    snap.cloud_wall = 100
+                    node.trajectory_clock.consume = lambda now: 0.05
+                    node.trajectory_clock.fresh = lambda now: True
+                    for index in range(3):
+                        snap.stamp += 1
+                        snap.scans += 1
+                        node.pacer.total_s = 100.0 + index * 0.5
+                        GoalNavigator.publish_target(node)
+                        if index < 2:
+                            self.assertEqual(node.follower.phase, "PAUSED")
+                            self.assertTrue(node.auto_recover)
+                            self.assertIsNone(node.plan_thread)
+                            np.testing.assert_allclose(targets[-1].velocity[:2], [0, 0])
+                    node.plan_thread.join(5)
+                    self.assertFalse(node.plan_thread.is_alive())
+                    GoalNavigator.publish_target(node)
+                self.assertEqual(node.follower.phase, "NAVIGATING")
+                self.assertTrue(route_safe(snap, node.follower.path))
+                self.assertGreater(len(node.follower.path), 2)
+                if mode != "explore":
+                    self.assertIs(node.active_ui_command, command)
+                else:
+                    self.assertEqual(node.exploration.phase, "TRAVELLING")
+                self.assertFalse(node.auto_recover)
+                self.assertTrue(node.commands.empty())
+                np.testing.assert_allclose(node.target_goal, node.home_world_xy)
+
+    def test_home_recovery_is_cancelled_by_hold_or_safety_fault(self):
+        for fault in ("hold", "pose", "height", "tracking", "callback", "position", "offboard"):
+            with self.subTest(fault=fault):
+                node, _, _, _ = navigator_fixture()
+                snap = node.feed.get()[0]
+                node.home_world_xy = node.target_goal.copy()
+                node.returning_home = True
+                node.stop("Temporary input gap", auto_recover=True)
+                if fault == "hold":
+                    node.commands.put(dict(action="hold"))
+                elif fault == "pose":
+                    snap.pose[0] += 0.3
+                elif fault == "height":
+                    node.position.z = -1.3
+                elif fault == "tracking":
+                    node.stop("Trajectory tracking error exceeded 0.35 m")
+                elif fault == "position":
+                    node.state.last_progress = 90.0
+                elif fault == "offboard":
+                    node.status.nav_state = VehicleStatus.NAVIGATION_STATE_POSCTL
+                else:
+                    node.last_callback = 99.0
+                with patch("ros2_navigate.time.monotonic", return_value=100.0):
+                    GoalNavigator.publish_target(node)
+                    self.assertFalse(node.auto_recover)
+                    self.assertIsNone(node.plan_thread)
+                    # Restoring inputs alone must not resume an operator/safety pause.
+                    snap.pose[0] = 2.0
+                    node.position.z = -1.0
+                    node.position.timestamp += 1
+                    node.state.observe(node.position, 100.0)
+                    node.status.nav_state = VehicleStatus.NAVIGATION_STATE_OFFBOARD
+                    for index in range(3):
+                        snap.stamp += 1
+                        node.pacer.total_s = 100 + index * 0.5
+                        GoalNavigator.publish_target(node)
+                self.assertIsNone(node.plan_thread)
+                self.assertTrue(node.commands.empty())
+                self.assertEqual(
+                    node.follower.phase, "HOLD" if fault in ("hold", "offboard") else "PAUSED"
+                )
 
     def test_home_arrival_confirms_settling_and_finishes_hover_without_land(self):
         node, _, _, _ = navigator_fixture()
@@ -1315,7 +1480,7 @@ class RuntimeTests(unittest.TestCase):
         node.exploration.phase = "TRAVELLING"
         reference = node.follower.target.copy()
         choice = ExplorationChoice([3.0, 2.0], [list(node.world_pose), [3.0, 2.0]], 3.0, 1.0, 20)
-        with patch("ros2_navigate.choose_frontier", return_value=choice):
+        with patch("navigation.planning_jobs.choose_frontier", return_value=choice):
             node.launch_reconsideration(snap)
             node.reconsider_thread.join(2)
         self.assertEqual(node.follower.phase, "NAVIGATING")
@@ -1624,7 +1789,7 @@ class MapFeedTests(unittest.TestCase):
         with (
             patch("navigation.feed.time.monotonic", return_value=100),
             patch(
-                "navigation.feed.center_geometry",
+                "navigation.map_geometry.center_geometry",
                 wraps=__import__(
                     "navigation.centering", fromlist=["center_geometry"]
                 ).center_geometry,
@@ -1661,6 +1826,9 @@ class MapFeedTests(unittest.TestCase):
         settings = load_settings()
         feed = MapFeed.__new__(MapFeed)
         feed.settings = settings
+        from navigation.map_geometry import MapGeometry
+
+        feed.geometry = SimpleNamespace(call=MapGeometry(settings))
         feed.lock = threading.Lock()
         feed.map_condition = threading.Condition(feed.lock)
         feed.pending_map = None

@@ -34,11 +34,11 @@ from navigation.motion import (
     acceleration_feedforward,
 )
 from navigation.source_time import SampleTimeline, ReferenceHistory
-from navigation.planning import plan, segment_safe, segment_cost
+from navigation.planning import segment_safe, segment_cost
 from navigation.centering import routing_geometry
-from navigation.exploration import ExplorationSession, choose_frontier, visible_unknown
+from navigation.exploration import ExplorationSession
 from navigation.settings import load_settings
-from navigation.mission import ExploreMission, assess_completion, save_map
+from navigation.mission import ExploreMission
 from navigation.ros_map import RosMapPublisher
 from navigation.reset import ExperimentReset, EmptyFeed
 from navigation.history import RunHistory
@@ -48,6 +48,8 @@ from navigation.diagnostic_wire import DiagnosticEmitter
 from navigation.diagnostics import finite
 from navigation.background import LatestWorker
 from navigation.async_frontiers import AsyncFrontiers
+from navigation.process_worker import ProcessService
+from navigation.control_timing import ControlTiming
 from navigation.prepared_route import CommittedPrefix, PreparedRoute, route_safe, remaining_safe
 from navigation.braking import swept_space_safe
 
@@ -133,6 +135,8 @@ class GoalNavigator(HoverPublisher):
         self.alignment_settled_since = None
         self.alignment_capture_stamp = None
         self.alignment_capture_scans = 0
+        self.planning = ProcessService("planning", "navigation.planning_jobs:PlanningJobs")
+        self.replanning = ProcessService("replanning", "navigation.planning_jobs:PlanningJobs")
         self.reconsider_thread = None
         self.reconsider_results = Queue()
         self.reconsider_mark = None
@@ -182,12 +186,23 @@ class GoalNavigator(HoverPublisher):
             self.on_landed,
             qos_profile_sensor_data,
         )
-        self.ros_map = RosMapPublisher(self, self.settings.floor_z_m + 1.0)
+        self.report_service = ProcessService(
+            "report_writer",
+            "navigation.report_jobs:ReportWriter",
+            Path(__file__).parent,
+            self.settings.floor_z_m + 1.0,
+        )
         self.runtime_status = RUNTIME.report()
         self.last_background_report = 0.0
         self.reporting = LatestWorker("navigation_reporting", self.publish_reports)
 
     def destroy_node(self):
+        self.planning.close()
+        self.replanning.close()
+        for thread in (self.plan_thread, self.reconsider_thread):
+            if thread is not None:
+                thread.join(timeout=3)
+        self.report_service.close()
         self.reporting.close()
         self.notices.close()
         self.exploration.frontier_ledger.close()
@@ -405,6 +420,7 @@ class GoalNavigator(HoverPublisher):
                 "stop" if phase == "PAUSED" else "controller_transition",
                 reason=reason,
                 phase=phase,
+                control_timing=getattr(self, "last_control_timing", None),
                 clock=self.trajectory_clock.report(time.monotonic()),
                 tracking=getattr(self.follower, "tracking", None),
                 map_health=getattr(self, "map_health", None),
@@ -425,7 +441,8 @@ class GoalNavigator(HoverPublisher):
                 tracking=getattr(self.follower, "tracking", None),
             )
         self.auto_recover = bool(
-            auto_recover and (self.mission.enabled or self.exploration.enabled)
+            auto_recover
+            and (self.mission.enabled or self.exploration.enabled or self.target_goal is not None)
         )
         self.recovery_stamp = None
         self.recovery_scans = 0
@@ -463,12 +480,17 @@ class GoalNavigator(HoverPublisher):
         goal = self.target_goal.copy()
         self.follower.hold(start, "Planning route", "PLANNING")
 
+        request = (
+            "plan",
+            dict(token=token, snap=snap, settings=self.settings, start=start, goal=goal),
+        )
+
         def work():
             try:
-                path = PreparedRoute(plan(snap, start, goal), snap.model, self.settings)
-                self.plan_results.put((token, path, None, None))
-            except ValueError as exc:
-                self.plan_results.put((token, None, str(exc), None))
+                result = self.planning.call(request)
+            except Exception as exc:
+                result = (token, None, str(exc), None)
+            self.plan_results.put(result)
 
         self.plan_thread = threading.Thread(target=work, daemon=True)
         self.plan_thread.start()
@@ -490,22 +512,27 @@ class GoalNavigator(HoverPublisher):
         self.target_goal = None
         self.follower.hold(start, "Selecting frontier viewpoint", "PLANNING")
 
+        request = (
+            "frontier",
+            dict(
+                token=token,
+                snap=snap,
+                settings=self.settings,
+                start=start,
+                visited=visited,
+                trail=trail,
+                catalog=catalog,
+                active_id=active_id,
+                mission_requested=mission_requested,
+            ),
+        )
+
         def work():
             try:
-                choice = choose_frontier(
-                    snap, start, visited, trail, catalog=catalog, active_id=active_id
-                )
-                path = PreparedRoute(choice.path, snap.model, self.settings)
-                self.plan_results.put((token, path, None, choice))
-            except ValueError as exc:
-                if mission_requested:
-                    evidence = assess_completion(snap, start)
-                    self.plan_results.put((token, evidence, None, ("mission_check", snap.stamp)))
-                else:
-                    evidence = assess_completion(snap, start)
-                    self.plan_results.put(
-                        (token, evidence, str(exc), ("exploration_check", snap.stamp))
-                    )
+                result = self.planning.call(request)
+            except Exception as exc:
+                result = (token, None, str(exc), None)
+            self.plan_results.put(result)
 
         self.plan_thread = threading.Thread(target=work, daemon=True)
         self.plan_thread.start()
@@ -520,9 +547,14 @@ class GoalNavigator(HoverPublisher):
         self.mission.phase = "VERIFYING"
         self.mission.reason = "Checking whether the observed component is enclosed"
 
+        request = ("check", dict(token=token, snap=snap, start=start))
+
         def work():
-            evidence = assess_completion(snap, start)
-            self.plan_results.put((token, evidence, None, ("mission_check", snap.stamp)))
+            try:
+                result = self.planning.call(request)
+            except Exception as exc:
+                result = (token, None, str(exc), None)
+            self.plan_results.put(result)
 
         self.plan_thread = threading.Thread(target=work, daemon=True)
         self.plan_thread.start()
@@ -549,41 +581,28 @@ class GoalNavigator(HoverPublisher):
             p.tolist() for p in self.follower.path[self.follower.index :]
         ]
 
+        request = (
+            "reconsider",
+            dict(
+                token=token,
+                snap=snap,
+                settings=self.settings,
+                current=current,
+                visited=visited,
+                trail=trail,
+                catalog=catalog,
+                active_id=active_id,
+                prefix=prefix,
+                current_route=current_route,
+            ),
+        )
+
         def work():
             try:
-                gain = visible_unknown(
-                    snap.model.grid, snap.model.cell(current), snap.model.resolution
-                )
-                choice = choose_frontier(
-                    snap,
-                    prefix.anchor,
-                    visited,
-                    trail,
-                    catalog=catalog,
-                    active_id=active_id,
-                    current_goal=current,
-                )
-                choice.path = PreparedRoute(
-                    prefix.points + choice.path[1:], snap.model, self.settings
-                )
-                choice.path.commitment = prefix
-                choice.route_length_m += prefix.length
-                choice.selection_reason += f"; {prefix.length:.1f} m committed prefix"
-                if snap.model.cell(choice.goal) == snap.model.cell(current):
-                    _, _, cost = routing_geometry(snap)
-
-                    def route_cost(route):
-                        return sum(
-                            segment_cost(snap.model.cell(a), snap.model.cell(b), cost)
-                            for a, b in zip(route, route[1:])
-                        )
-
-                    choice.path.recenter_improves = (
-                        route_cost(choice.path) < route_cost(current_route) * 0.95
-                    )
-                self.reconsider_results.put((token, current, gain, choice, None))
-            except ValueError as exc:
-                self.reconsider_results.put((token, current, None, None, str(exc)))
+                result = self.replanning.call(request)
+            except Exception as exc:
+                result = (token, current, None, None, str(exc))
+            self.reconsider_results.put(result)
 
         self.reconsider_thread = threading.Thread(target=work, daemon=True)
         self.reconsider_thread.start()
@@ -722,15 +741,17 @@ class GoalNavigator(HoverPublisher):
             / ("mission_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f"))
         )
 
+        request = (
+            "save",
+            dict(token=token, snap=snap, folder=folder, evidence=evidence, history=history),
+        )
+
         def work():
             try:
-                saved = save_map(snap, folder, evidence)
-                (folder / "history.json").write_text(
-                    json.dumps(history, indent=2) + "\n", encoding="utf-8"
-                )
-                self.plan_results.put((token, saved, None, "mission_saved"))
-            except (OSError, ValueError) as exc:
-                self.plan_results.put((token, None, str(exc), "mission_saved"))
+                result = self.planning.call(request)
+            except Exception as exc:
+                result = (token, None, str(exc), "mission_saved")
+            self.plan_results.put(result)
 
         self.plan_thread = threading.Thread(target=work, daemon=True)
         self.plan_thread.start()
@@ -797,6 +818,8 @@ class GoalNavigator(HoverPublisher):
                 and self.mission.phase == "PAUSED"
                 or self.exploration.enabled
                 and self.exploration.phase == "PAUSED"
+                or self.target_goal is not None
+                and self.follower.phase == "PAUSED"
             )
         ):
             return
@@ -822,6 +845,13 @@ class GoalNavigator(HoverPublisher):
             and self.pacer.total_s - self.recovery_started_s >= 1.0
             and self.commands.empty()
         ):
+            if self.target_goal is not None and not (
+                self.mission.enabled or self.exploration.enabled
+            ):
+                # Keep the operator's command and destination. The control
+                # loop plans from the stopped pose using the latest map.
+                self.stop("Fresh scans and stable hover restored; replanning route", "PLANNING")
+                return
             try:
                 self.commands.put_nowait(dict(action="resume"))
             except Full:
@@ -1059,7 +1089,36 @@ class GoalNavigator(HoverPublisher):
             self.command_feedback(item, "rejected", reason)
 
     def publish_target(self):
-        control_started_ns = time.perf_counter_ns()
+        timing = ControlTiming()
+        previous = getattr(self, "last_control_started_ns", None)
+        if previous is not None:
+            timing.callback_gap_s = (timing.started_ns - previous) / 1e9
+        self.last_control_started_ns = timing.started_ns
+        timing.previous_command_published = (
+            getattr(self, "last_control_timing", {}).get("outcome") == "published"
+        )
+        try:
+            GoalNavigator._publish_target(self, timing)
+        except Exception:
+            timing.outcome = "exception"
+            raise
+        finally:
+            timing.mark("finish")
+            self.last_control_timing = timing.report()
+            diagnostics = getattr(self, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.emit("control_timing", **self.last_control_timing)
+                if self.last_control_timing["deadline_missed"] and timing.outcome != "rejected":
+                    diagnostics.emit(
+                        "deadline_miss",
+                        phase=self.follower.phase,
+                        reason="Control deadline missed: "
+                        + self.last_control_timing["deadline_cause"],
+                        **self.last_control_timing,
+                    )
+
+    def _publish_target(self, timing):
+        control_started_ns = timing.started_ns
         now = time.monotonic()
         retained_acceleration = self.acceleration_reference_ned.copy()
         self.velocity_reference_ned = np.zeros(2)
@@ -1082,6 +1141,7 @@ class GoalNavigator(HoverPublisher):
             else 0.0
         )
         self.pacer_mark = self.pacer.total_s
+        timing.mark("clock_inputs")
         status_fresh = self.status_fresh(now) and not self.status.failsafe
         landing = self.mission.observe_landing(
             fresh=status_fresh,
@@ -1114,16 +1174,22 @@ class GoalNavigator(HoverPublisher):
             )
             self.ready_samples = 0
             self.exploration.pause("Position unavailable; targets paused")
-            if self.mission.enabled or self.follower.phase in (
-                "NAVIGATING",
-                "SETTLING",
-                "PLANNING",
-                "BLOCKED",
+            if (
+                self.mission.enabled
+                or self.auto_recover
+                or self.follower.phase
+                in (
+                    "NAVIGATING",
+                    "SETTLING",
+                    "PLANNING",
+                    "BLOCKED",
+                )
             ):
                 self.stop("Position unavailable; targets paused")
             self.say(self.state.fault or "Waiting for fresh valid PX4 position; targets paused")
             self.update_dashboard(now, None, False)
             return
+        timing.mark("telemetry_guard")
         if any(
             self.count_publishers(topic) > 1
             for topic in ("/fmu/in/offboard_control_mode", "/fmu/in/trajectory_setpoint")
@@ -1135,6 +1201,7 @@ class GoalNavigator(HoverPublisher):
             self.reject_pending_commands("Another flight-target publisher is present")
             self.update_dashboard(now, None, False)
             return
+        timing.mark("publisher_guard")
         p = self.position
         snap, failure = self.feed.get()
         map_ready = snap is not None and not failure and snap.fresh(now)
@@ -1178,7 +1245,9 @@ class GoalNavigator(HoverPublisher):
                 failure = f"Capture-time world/PX4 check: {detail}; holding"
         if self.reference is None:
             self.reference = np.array(self.state.anchor[:2])
-        active = self.follower.phase in ("NAVIGATING", "SETTLING", "PLANNING", "BLOCKED")
+        active = self.follower.phase in ("NAVIGATING", "SETTLING", "PLANNING", "BLOCKED") or (
+            self.follower.phase == "PAUSED" and self.auto_recover
+        )
         if self.alignment is not None and not self.flight_active(now):
             self.hold_yaw = p.heading
             if not self.status_fresh(now):
@@ -1206,7 +1275,13 @@ class GoalNavigator(HoverPublisher):
                         else "Control callback delayed"
                     )
                 ),
-                auto_recover=transient_map_gap and 0 <= gap <= 0.5,
+                auto_recover=(
+                    transient_map_gap
+                    or self.target_goal is not None
+                    and map_ready
+                    and not clock_ready
+                )
+                and 0 <= gap <= 0.5,
             )
         elif active and (
             abs(p.z + 1.0) > 0.25
@@ -1215,11 +1290,15 @@ class GoalNavigator(HoverPublisher):
             or not all(math.isfinite(v) for v in (p.vx, p.vy, p.vz))
         ):
             self.stop("Height tracking or velocity validity failed")
+        timing.mark("map_and_flight_guards")
         self.recovery_tick(now, snap, map_ready)
         self.commands_tick(now, snap, map_ready)
+        timing.mark("operator_commands")
         if self.flight_active(now):
             self.exploration_tick(now, snap, map_ready)
+            timing.mark("exploration")
             self.mission_tick(now, snap, map_ready)
+            timing.mark("mission")
         if map_ready and self.flight_active(now):
             if (
                 self.target_goal is not None
@@ -1312,14 +1391,18 @@ class GoalNavigator(HoverPublisher):
                         )
             except Empty:
                 pass
+            timing.mark("plan_results")
             if self.follower.phase == "NAVIGATING" and snap.scans != self.last_map_scans:
                 if not remaining_safe(self.follower, snap, self.world_pose):
                     self.stop("Route changed; waiting to replan", "BLOCKED")
                 self.last_map_scans = snap.scans
+            timing.mark("new_map_route_validation")
             if self.state.motion_ready(now) and self.pacer.fresh(now):
                 self.reconsideration_tick(snap)
+                timing.mark("reconsideration")
                 self.exploration.record_pose(self.world_pose)
                 observed_corridor = remaining_safe(self.follower, snap, self.world_pose)
+                timing.mark("remaining_route_validation")
                 previous_target = (
                     self.follower.target.copy() if self.follower.target is not None else None
                 )
@@ -1363,6 +1446,8 @@ class GoalNavigator(HoverPublisher):
                     if route_direction is not None and np.linalg.norm(route_direction) > 1e-8
                     else None
                 )
+                timing.mark("tracking_alignment")
+                previous_phase = self.follower.phase
                 self.follower.tick(
                     dt,
                     self.world_pose,
@@ -1381,8 +1466,9 @@ class GoalNavigator(HoverPublisher):
                         snap.body_free, snap.model.cell(a), snap.model.cell(b)
                     ),
                 )
+                timing.mark("motion")
                 self.follower.speed_decision["tracking_alignment"] = self.tracking_alignment
-                if self.follower.phase == "PAUSED":
+                if self.follower.phase == "PAUSED" and previous_phase != "PAUSED":
                     self.stop(self.follower.reason, "PAUSED")
                 if (
                     previous_target is not None
@@ -1448,7 +1534,9 @@ class GoalNavigator(HoverPublisher):
                     self.say(self.follower.reason)
         if self.alignment is not None and self.follower.target is not None:
             self.reference = self.alignment.ned(self.follower.target)
+        timing.mark("feedforward_and_settling")
         self.update_yaw(dt, now, map_ready, gap)
+        timing.mark("yaw")
         if self.native_control is not None:
             try:
                 self.native_control.submit(
@@ -1458,7 +1546,16 @@ class GoalNavigator(HoverPublisher):
                     self.hold_yaw,
                     issued_ns=control_started_ns,
                 )
+                timing.submission = getattr(self.native_control, "last_submission", None)
+                timing.outcome = "published"
+                timing.mark("native_submit")
             except RuntimeError as error:
+                timing.submission = getattr(error, "submission", None)
+                timing.outcome = "rejected"
+                timing.mark("native_submit")
+                self.last_control_timing = timing.report()
+                if hasattr(self, "diagnostics"):
+                    self.diagnostics.emit("control_rejection", **self.last_control_timing)
                 self.native_control.revoke()
                 self.ready_samples = 0
                 self.reference_history.clear()
@@ -1475,6 +1572,8 @@ class GoalNavigator(HoverPublisher):
             target.acceleration = [*map(float, self.acceleration_reference_ned), math.nan]
             self.mode_pub.publish(mode)
             self.target_pub.publish(target)
+            timing.outcome = "published"
+            timing.mark("python_submit")
         if self.follower.target is not None:
             self.reference_history.record(
                 reference_stamp,
@@ -1491,7 +1590,9 @@ class GoalNavigator(HoverPublisher):
                     self.state.clock_rebases,
                 ),
             )
+        timing.mark("reference_history")
         self.update_dashboard(now, snap, map_ready)
+        timing.mark("dashboard_handoff")
         if hasattr(self, "diagnostics"):
             self.diagnostics.emit(
                 "reference",
@@ -1659,6 +1760,7 @@ class GoalNavigator(HoverPublisher):
             target_stream_hz=20,
             control_profile="position_with_route_velocity_feedforward",
             control_backend=self.control_backend,
+            control_timing=getattr(self, "last_control_timing", None),
             native_publisher=(
                 self.native_control.report() if self.native_control is not None else None
             ),
@@ -1729,14 +1831,7 @@ class GoalNavigator(HoverPublisher):
         if captured - self.last_background_report < 0.5:
             return
         self.last_background_report = captured
-        self.runtime_status = RUNTIME.report()
-        self.ros_map.publish(snap, report["path"], report["trail"])
-        path = Path(__file__).parent / "logs" / "navigation_state.json"
-        temp = path.with_suffix(".tmp")
-        temp.write_text(json.dumps(report, allow_nan=False, indent=2) + "\n", encoding="utf-8")
-        temp.replace(path)
-        with path.with_name("navigation_trace.jsonl").open("a", encoding="utf-8") as trace:
-            trace.write(json.dumps(report, allow_nan=False, separators=(",", ":")) + "\n")
+        self.runtime_status = self.report_service.call((report, snap))
 
     def flight_readiness(self, now, map_ready):
         status = self.status

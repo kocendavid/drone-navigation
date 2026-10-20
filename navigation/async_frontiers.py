@@ -2,27 +2,23 @@
 
 import threading
 
-from .background import LatestWorker
+from .process_worker import ProcessLatestWorker
 from .frontier_ledger import FrontierLedger
 from .mission import assess_completion
 
 
-class AsyncFrontiers:
+class FrontierAnalyzer:
     def __init__(self):
-        self.ledger = FrontierLedger()  # Owned only by the worker.
-        self.lock = threading.Lock()
-        self.choice = None
-        self.consumed = None
-        self.worker = LatestWorker("frontier_analysis", self._analyze)
-        self.empty = self.ledger.report()
+        self.ledger = FrontierLedger()
+        self.choice_version = 0
 
-    def _analyze(self, snapshot):
+    def __call__(self, value):
         from .exploration import frontiers
 
-        with self.lock:
-            choice, self.choice = self.choice, None
-        if choice is not None:
+        snapshot, choice, version = value
+        if choice is not None and version != self.choice_version:
             self.ledger.apply_choice(choice)
+            self.choice_version = version
         changes = self.ledger.update(snapshot, frontiers(snapshot.model.grid))
         return dict(
             valid=snapshot.valid,
@@ -33,8 +29,27 @@ class AsyncFrontiers:
             completion=assess_completion(snapshot, snapshot.pose[:2]) if snapshot.valid else None,
         )
 
+
+class AsyncFrontiers:
+    def __init__(self, worker_factory=None):
+        self.lock = threading.Lock()
+        self.choice = None
+        self.choice_version = 0
+        self.consumed = None
+        self.worker = (
+            worker_factory("frontier_analysis", FrontierAnalyzer())
+            if worker_factory
+            else ProcessLatestWorker(
+                "frontier_analysis", "navigation.async_frontiers:FrontierAnalyzer"
+            )
+        )
+        self.empty = FrontierLedger().report()
+
     def observe_map(self, snapshot):
-        self.worker.submit(snapshot.stamp, snapshot)
+        with self.lock:
+            choice, version = self.choice, self.choice_version
+        # Repeat the versioned choice: replacing a pending map cannot lose it.
+        self.worker.submit(snapshot.stamp, (snapshot, choice, version))
         latest, failure = self.worker.latest()
         if failure:
             raise ValueError("Frontier analysis failed: " + failure)
@@ -78,6 +93,7 @@ class AsyncFrontiers:
     def apply_choice(self, choice):
         with self.lock:
             self.choice = choice
+            self.choice_version += 1
 
     def close(self):
         self.worker.close()

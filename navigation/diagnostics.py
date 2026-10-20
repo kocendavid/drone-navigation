@@ -92,7 +92,7 @@ def analyze(records, event=None):
     of zero: they are counted as unavailable evidence.
     """
     records = list(records)
-    stops = [r for r in records if r["kind"] == "stop"]
+    stops = [r for r in records if r["kind"] in ("stop", "deadline_miss")]
     stop = event or (stops[-1] if stops else None)
     anchor = stop["received_wall_s"] if stop else math.inf
     truth = [r for r in records if r["kind"] == "isaac_truth"]
@@ -231,6 +231,12 @@ def analyze(records, event=None):
         stages[kind + "_" + field] = statistics(
             [r[field] for r in records if r["kind"] == kind and r.get(field) is not None]
         )
+    controls = [r for r in records if r["kind"] == "control_timing"]
+    for stage in sorted({name for row in controls for name in row.get("stages", {})}):
+        for metric in ("wall_s", "cpu_s"):
+            stages["control_" + stage + "_" + metric] = statistics(
+                [row["stages"][stage][metric] for row in controls if stage in row.get("stages", {})]
+            )
     return dict(
         schema=1,
         estimation_error_m=statistics(estimation),
@@ -239,6 +245,8 @@ def analyze(records, event=None):
         controller_position_error_m=statistics(controller),
         unavailable=unavailable,
         timing_stages=stages,
+        control_rejections=[r for r in records if r["kind"] == "control_rejection"][-20:],
+        deadline_misses=[r for r in controls if r.get("deadline_missed")][-20:],
         stop=stop,
         aligned_samples=details[-200:],
         interpretation="Estimation compares Isaac/PX4 at raw PX4 sample time. Intended tracking uses bracketed source-time reference samples; received setpoints use zero-order hold. Native receipt confirms PX4 reception, not motor execution. Arrival times never establish source-time equality. Gaps/resets/invalid estimates remain unavailable.",

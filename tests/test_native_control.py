@@ -5,6 +5,9 @@ import os
 import random
 import socket
 import sys
+import threading
+import tempfile
+from pathlib import Path
 import time
 from types import SimpleNamespace
 import unittest
@@ -208,6 +211,39 @@ class NativePublisherTests(unittest.TestCase):
         self.spin(0.12)
         self.assertEqual(self.publisher.report()["published"], first["published"])
 
+    def test_report_process_initializes_ros_and_writes_only_its_test_directory(self):
+        import json
+        from navigation.process_worker import ProcessService
+        from test_navigation import snapshot
+
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            (project / "navigation").mkdir()
+            (project / "config").mkdir()
+            (project / "logs").mkdir()
+            for name in (
+                "ros2_navigate.py",
+                "ros2_hover.py",
+                "ros2_step.py",
+                "config/navigation_settings.json",
+            ):
+                (project / name).write_text("test")
+            service = ProcessService(
+                "test_report", "navigation.report_jobs:ReportWriter", project, 1.0
+            )
+            try:
+                runtime = service.call(
+                    (dict(path=[[2, 3], [2, 4]], trail=[], phase="HOLD"), snapshot())
+                )
+                self.assertFalse(runtime["reload_pending"])
+                report = json.loads((project / "logs" / "navigation_state.json").read_text())
+                self.assertEqual(report["phase"], "HOLD")
+                self.assertEqual(
+                    len((project / "logs" / "navigation_trace.jsonl").read_text().splitlines()), 1
+                )
+            finally:
+                service.close()
+
     def test_native_publication_continues_while_python_holds_the_gil(self):
         self.publisher.submit([0, 0, -1], [0.6, 0], [0, 0], 0)
         previous = sys.getswitchinterval()
@@ -222,17 +258,92 @@ class NativePublisherTests(unittest.TestCase):
         self.assertGreaterEqual(self.publisher.report()["published"], 2)
 
     def test_old_invalid_and_revoked_commands_cannot_extend_motion_permission(self):
-        for position, issued in (
-            ([0, 0, -1], time.perf_counter_ns() - 200_000_000),
-            ([math.nan, 0, -1], None),
+        for position, issued, reason in (
+            ([0, 0, -1], time.perf_counter_ns() - 200_000_000, "stale_command"),
+            ([math.nan, 0, -1], None, "invalid_frame"),
+            ([0, 0, -1], time.perf_counter_ns() + 1_000_000_000, "future_command"),
         ):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(RuntimeError) as failure:
                 self.publisher.submit(position, [0.6, 0], [0, 0], 0, issued_ns=issued)
+            self.assertEqual(failure.exception.submission["reason"], reason)
+            self.assertGreaterEqual(failure.exception.submission["lock_wait_s"], 0)
+        rejection = self.publisher.report()["last_rejection"]
         self.publisher.submit([0, 0, -1], [0.6, 0], [0, 0], 0)
+        self.assertEqual(self.publisher.report()["last_rejection"], rejection)
         self.publisher.revoke()
         published = self.publisher.report()["published"]
         self.spin(0.12)
         self.assertEqual(self.publisher.report()["published"], published)
+
+    def test_real_command_generation_meets_lease_during_child_cpu_stalls(self):
+        from ros2_navigate import GoalNavigator
+        from test_navigation import navigator_fixture
+        from test_process_isolation import probe_service
+
+        services = [probe_service(), probe_service()]
+        for service in services:
+            self.addCleanup(service.close)
+            service.call(("echo", None))
+        threads = [threading.Thread(target=s.call, args=(("busy", 0.8),)) for s in services]
+        for thread in threads:
+            thread.start()
+        node, _, _, _ = navigator_fixture()
+        node.native_control = self.publisher
+        node.follower.begin([[2, 3], [2, 4]])
+        node.target_goal = np.array([2, 4])
+        timings = []
+        end = time.perf_counter() + 0.35
+        while time.perf_counter() < end:
+            node.pacer.total_s += 0.02
+            with patch("ros2_navigate.time.monotonic", return_value=100):
+                GoalNavigator.publish_target(node)
+            timings.append(node.last_control_timing)
+            self.spin(0.015)
+        self.assertGreaterEqual(len(timings), 6)
+        self.assertEqual(self.publisher.report()["rejected"], 0)
+        self.assertEqual(node.follower.phase, "NAVIGATING")
+        self.assertTrue(all(t["submission"]["command_age_s"] < 0.1 for t in timings))
+        self.assertTrue(any(t.is_alive() for t in threads))
+        for thread in threads:
+            thread.join(3)
+        self.assertTrue(self.targets)
+
+    def test_deadline_miss_records_the_slow_stage_and_survives_subsequent_hold(self):
+        from ros2_navigate import GoalNavigator
+        from test_navigation import navigator_fixture
+
+        node, _, _, _ = navigator_fixture()
+        node.native_control = self.publisher
+        node.trajectory_clock.report = lambda now: dict(available=True)
+        rows = []
+        node.diagnostics = SimpleNamespace(
+            emit=lambda kind, **fields: rows.append(dict(kind=kind, **fields))
+        )
+        node.follower.begin([[2, 3], [2, 4]])
+        node.target_goal = np.array([2, 4])
+        node.pacer.total_s += 0.05
+
+        def delayed_validation(*args):
+            time.sleep(0.12)
+            return True
+
+        with (
+            patch("ros2_navigate.time.monotonic", return_value=100),
+            patch("ros2_navigate.remaining_safe", side_effect=delayed_validation),
+        ):
+            GoalNavigator.publish_target(node)
+        rejection = next(r for r in rows if r["kind"] == "control_rejection")
+        self.assertEqual(rejection["submission"]["reason"], "stale_command")
+        self.assertGreaterEqual(rejection["stages"]["remaining_route_validation"]["wall_s"], 0.12)
+        self.assertGreaterEqual(rejection["submission"]["python_before_native_s"], 0.12)
+        self.assertTrue(rejection["deadline_missed"])
+        self.assertEqual(node.follower.phase, "PAUSED")
+        self.assertEqual(len(node.reference_history.rows), 0)
+        stop = next(r for r in rows if r["kind"] == "stop")
+        self.assertEqual(stop["control_timing"]["submission"]["reason"], "stale_command")
+        self.publisher.submit([0, 0, -1], [0, 0], [0, 0], 0)
+        self.assertEqual(self.publisher.report()["last_rejection"]["reason"], "stale_command")
+        self.assertTrue(any(r["kind"] == "control_timing" for r in rows))
 
     def test_python_navigator_submits_actual_reference_through_native_publisher(self):
         from ros2_navigate import GoalNavigator
@@ -401,18 +512,26 @@ class NativePublisherTests(unittest.TestCase):
         end = time.monotonic() + 5
         while not publisher.target.get_subscription_count() and time.monotonic() < end:
             self.spin(0.01)
+
+        def wait_for_target(x):
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                match = next((target for target in self.targets if target.position[0] == x), None)
+                if match is not None:
+                    return match
+                self.rclpy.spin_once(self.node, timeout_sec=0.005)
+            self.fail(f"No target at x={x} received within one second")
+
         now = time.monotonic()
         for index in range(5):
             clock.observe(index * 50_000_000, now)
         publisher.submit([41, 0, -1], [0.6, 0], [0.25, 0], 0)
-        self.spin(0.02)
-        self.assertAlmostEqual(self.targets[-1].velocity[0], 0.6)
+        self.assertAlmostEqual(wait_for_target(41).velocity[0], 0.6)
         clock.invalidate()
         publisher.submit([42, 0, -1], [0.6, 0], [0.25, 0], 0)
-        self.spin(0.03)
-        self.assertEqual(self.targets[-1].position[0], 42)
-        np.testing.assert_array_equal(self.targets[-1].velocity[:2], [0, 0])
-        np.testing.assert_array_equal(self.targets[-1].acceleration[:2], [0, 0])
+        target = wait_for_target(42)
+        np.testing.assert_array_equal(target.velocity[:2], [0, 0])
+        np.testing.assert_array_equal(target.acceleration[:2], [0, 0])
 
 
 if __name__ == "__main__":

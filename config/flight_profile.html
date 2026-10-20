@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Flight altitude &amp; speed</title>
+    <link rel="stylesheet" href="/vendor/uPlot.min.css" />
+    <script src="/vendor/uPlot.iife.min.js"></script>
+    <style>
+      :root {
+        color-scheme: dark;
+        font:
+          12px system-ui,
+          sans-serif;
+        color: #edf4fa;
+        background: #141e29;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 0 2px;
+      }
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px 12px;
+        flex-wrap: wrap;
+      }
+      select,
+      button {
+        color: #edf4fa;
+        background: #223242;
+        border: 1px solid #2a3a49;
+        border-radius: 6px;
+        padding: 6px;
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      a {
+        color: #58d6e6;
+      }
+      p {
+        margin: 10px 0;
+        color: #9caebe;
+        line-height: 1.5;
+      }
+      #status {
+        flex-basis: 100%;
+        color: #9caebe;
+      }
+      #status[data-live="true"] {
+        color: #79dfac;
+      }
+      h3 {
+        margin: 18px 0 8px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      h3 span {
+        color: #9caebe;
+        font-weight: 400;
+      }
+      .chart {
+        min-width: 0;
+        min-height: 270px;
+      }
+      .uplot {
+        font: inherit;
+      }
+      .u-legend {
+        width: 100%;
+        text-align: left;
+        margin: 8px 0 0;
+        font-size: 11px;
+      }
+      .u-legend .u-series {
+        display: inline-flex;
+        gap: 4px;
+        margin: 3px 10px 3px 0;
+      }
+      .u-legend .u-series:first-child {
+        display: flex;
+        margin-bottom: 6px;
+        color: #9caebe;
+      }
+      .hover-time {
+        position: absolute;
+        top: 6px;
+        z-index: 10;
+        padding: 5px 7px;
+        border: 1px solid #58d6e6;
+        border-radius: 5px;
+        background: #141e29f2;
+        color: #edf4fa;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        max-width: 100%;
+        white-space: normal;
+        pointer-events: none;
+      }
+      .u-legend .u-label {
+        font-weight: 400;
+      }
+      .event-marker {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      .event-guide {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        border-left: 1px dashed #58d6e6;
+      }
+      .event-dot {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        transform: translate(-50%, -50%);
+        border: 2px solid #edf4fa;
+        border-radius: 50%;
+        background: #58d6e6;
+        box-shadow: 0 0 0 4px #58d6e644;
+      }
+      .event-time {
+        position: absolute;
+        top: 6px;
+        max-width: 100%;
+        padding: 5px 7px;
+        border: 1px solid #58d6e6;
+        border-radius: 5px;
+        background: #141e29f2;
+        color: #edf4fa;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      .u-legend .u-value {
+        min-width: 46px;
+        font-variant-numeric: tabular-nums;
+      }
+      .u-cursor-x,
+      .u-cursor-y {
+        border-color: #9caebe;
+      }
+      .u-select {
+        background: #58d6e633;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      a[aria-disabled="true"] {
+        pointer-events: none;
+        opacity: 0.4;
+      }
+      :focus-visible {
+        outline: 2px solid #58d6e6;
+        outline-offset: 3px;
+      }
+      #waiting {
+        padding: 18px 10px;
+        border: 1px dashed #2a3a49;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <label
+        >View
+        <select id="view">
+          <option value="navigation">Navigation &amp; pause</option>
+          <option value="full">Full flight</option>
+        </select></label
+      >
+      <button id="reset" type="button" title="Reset zoom and follow incoming samples">
+        Follow live
+      </button>
+      <a id="open" href="/?view=navigation" target="_blank" rel="noopener">Expand</a>
+      <a id="csv" href="/samples.csv" download aria-disabled="true">CSV</a>
+      <span id="status" role="status">Connecting to recorder…</span>
+    </div>
+    <p>One sample per simulation second · updates on capture.</p>
+    <p id="waiting">Waiting for the first recorded flight samples.</p>
+    <div id="charts" hidden>
+      <h3>Altitude <span>m above mapping floor</span></h3>
+      <div
+        id="altitude"
+        class="chart"
+        role="img"
+        aria-label="Altitude: simulator truth, PX4 estimate, and commanded height"
+      ></div>
+      <h3>Horizontal speed <span>m/s</span></h3>
+      <div
+        id="speed"
+        class="chart"
+        role="img"
+        aria-label="Horizontal speed: simulator actual, PX4 estimate, planner reference, and selected ceiling"
+      ></div>
+      <p id="interaction">
+        Hover for values · click a legend to toggle · drag to zoom · double-click to follow live.
+      </p>
+      <p>
+        Missing measurements stay gaps. Dashed red lines mark the 0.8–1.2 m mapper height limits;
+        vertical red lines mark sampled pauses. Expected speed is the planner reference.
+      </p>
+    </div>
+    <script>
+      const byId = (id) => document.getElementById(id);
+      const view = byId("view"),
+        status = byId("status");
+      const plots = [];
+      let samples = [],
+        pauses = [],
+        version = null,
+        run = null;
+      let userSelected = false,
+        zoom = null,
+        updating = false;
+      let eventHighlight = null;
+      const requestedView = new URLSearchParams(location.search).get("view");
+      if (["full", "navigation"].includes(requestedView)) {
+        view.value = requestedView;
+        userSelected = true;
+      }
+
+      const timestampFormatter = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Europe/Prague",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        fractionalSecondDigits: 3,
+        hourCycle: "h23",
+        timeZoneName: "short",
+      });
+      const timeFormatter = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Europe/Prague",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      });
+      function wallTimestamp(unix, short = false) {
+        if (!Number.isFinite(unix) || !Number.isFinite(new Date(unix * 1000).getTime()))
+          return short ? "—" : "Timestamp unavailable";
+        return (short ? timeFormatter : timestampFormatter).format(new Date(unix * 1000));
+      }
+      function sampleTimestamp(time, short = false) {
+        if (!Number.isFinite(time) || !samples.length) return wallTimestamp(null, short);
+        let lo = 0,
+          hi = samples.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >>> 1;
+          if (samples[mid].simulation_s < time) lo = mid + 1;
+          else hi = mid;
+        }
+        const right = samples[lo],
+          left = samples[lo - 1];
+        const sample =
+          !left || (right && right.simulation_s - time < time - left.simulation_s) ? right : left;
+        return wallTimestamp(
+          sample && Math.abs(sample.simulation_s - time) <= 0.55 ? sample.timestamp_unix_s : null,
+          short,
+        );
+      }
+
+      function markers(isAltitude) {
+        return (plot) => {
+          const ctx = plot.ctx,
+            box = plot.bbox;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(box.left, box.top, box.width, box.height);
+          ctx.clip();
+          ctx.strokeStyle = "#f2756499";
+          ctx.lineWidth = uPlot.pxRatio;
+          ctx.setLineDash([4 * uPlot.pxRatio, 4 * uPlot.pxRatio]);
+          for (const stamp of pauses) {
+            const x = plot.valToPos(stamp, "x", true);
+            ctx.beginPath();
+            ctx.moveTo(x, box.top);
+            ctx.lineTo(x, box.top + box.height);
+            ctx.stroke();
+          }
+          if (isAltitude)
+            for (const height of [0.8, 1.2]) {
+              const y = plot.valToPos(height, "y", true);
+              ctx.beginPath();
+              ctx.moveTo(box.left, y);
+              ctx.lineTo(box.left + box.width, y);
+              ctx.stroke();
+            }
+          ctx.restore();
+        };
+      }
+
+      function makePlot(id, definitions) {
+        const host = byId(id),
+          isAltitude = id === "altitude";
+        const hoverTime = document.createElement("div");
+        hoverTime.className = "hover-time";
+        hoverTime.hidden = true;
+        const eventMarker = document.createElement("div");
+        eventMarker.className = "event-marker";
+        eventMarker.hidden = true;
+        const eventGuide = document.createElement("div"),
+          eventDot = document.createElement("div"),
+          eventTime = document.createElement("div");
+        eventGuide.className = "event-guide";
+        eventDot.className = "event-dot";
+        eventTime.className = "event-time";
+        eventMarker.append(eventGuide, eventDot, eventTime);
+        function showEventMarker(plot) {
+          const time = eventHighlight?.simulation_s;
+          eventMarker.hidden =
+            !Number.isFinite(time) || time < plot.scales.x.min || time > plot.scales.x.max;
+          if (eventMarker.hidden) return;
+          const idx = plot.valToIdx(time),
+            stamp = plot.data[0][idx];
+          const series = plot.series.findIndex(
+            (series, index) => index > 0 && series.show && Number.isFinite(plot.data[index][idx]),
+          );
+          const available = Number.isFinite(stamp) && Math.abs(stamp - time) <= 0.55 && series > 0;
+          const x = plot.valToPos(time, "x");
+          eventGuide.style.left = x + "px";
+          eventDot.hidden = !available;
+          eventTime.replaceChildren();
+          const title = document.createElement("div"),
+            detail = document.createElement("div");
+          title.textContent =
+            "Event " + wallTimestamp(Date.parse(eventHighlight.timestamp_utc) / 1000);
+          detail.textContent = available
+            ? "Nearest sample: " + sampleTimestamp(stamp, true) + " · " + plot.series[series].label
+            : "No measurement at this time";
+          eventTime.append(title, detail);
+          eventTime.style.left =
+            Math.max(0, Math.min(x + 8, plot.over.clientWidth - eventTime.offsetWidth)) + "px";
+          if (available) {
+            eventDot.style.left = plot.valToPos(stamp, "x") + "px";
+            eventDot.style.top = plot.valToPos(plot.data[series][idx], "y") + "px";
+          }
+        }
+        function showHoverTime(plot) {
+          const stamp = plot.data[0][plot.cursor.idx];
+          hoverTime.hidden = !Number.isFinite(stamp) || plot.cursor.left < 0 || plot.cursor.top < 0;
+          if (hoverTime.hidden) return;
+          hoverTime.textContent = sampleTimestamp(stamp);
+          hoverTime.style.left =
+            Math.max(
+              0,
+              Math.min(plot.cursor.left + 8, plot.over.clientWidth - hoverTime.offsetWidth),
+            ) + "px";
+        }
+        const plot = new uPlot(
+          {
+            width: Math.max(240, host.clientWidth),
+            height: 224,
+            padding: [8, 12, 0, 0],
+            scales: {
+              x: { time: false },
+              y: {
+                range: (_u, min, max) => [
+                  Math.min(0, min ?? 0),
+                  Math.max(isAltitude ? 1.3 : 0.5, (max ?? 0) * 1.12),
+                ],
+              },
+            },
+            series: [
+              {
+                label: "Timestamp",
+                value: (_u, value) => sampleTimestamp(value),
+              },
+              ...definitions.map(([_key, label, stroke, dash]) => ({
+                label,
+                stroke,
+                dash,
+                width: 1.7,
+                spanGaps: false,
+                points: { size: 4 },
+                value: (_u, value) => (value == null ? "—" : value.toFixed(2)),
+              })),
+            ],
+            axes: [
+              {
+                stroke: "#9caebe",
+                grid: { stroke: "#263644" },
+                ticks: { stroke: "#2a3a49" },
+                font: "11px system-ui",
+                size: 34,
+                space: 85,
+                values: (_u, values) => values.map((v) => sampleTimestamp(v, true)),
+              },
+              {
+                stroke: "#9caebe",
+                grid: { stroke: "#263644" },
+                ticks: { stroke: "#2a3a49" },
+                font: "11px system-ui",
+                size: 44,
+                space: 36,
+              },
+            ],
+            cursor: {
+              sync: { key: "flight-profile", scales: ["x", null] },
+              drag: { x: true, y: false },
+            },
+            hooks: {
+              ready: [(plot) => plot.over.append(hoverTime, eventMarker)],
+              setCursor: [showHoverTime],
+              draw: [markers(isAltitude), showEventMarker],
+              setScale: [
+                (source, key) => {
+                  if (updating || key !== "x") return;
+                  zoom = { min: source.scales.x.min, max: source.scales.x.max };
+                  updating = true;
+                  for (const other of plots)
+                    if (other.plot !== source)
+                      other.plot.batch(() => other.plot.setScale("x", zoom));
+                  updating = false;
+                  byId("interaction").textContent =
+                    "Zoom held while recording · Follow live to show new samples.";
+                },
+              ],
+            },
+          },
+          [[], ...definitions.map(() => [])],
+          host,
+        );
+        plot.over.addEventListener("dblclick", follow);
+        plots.push({ plot, definitions });
+      }
+
+      function bounds() {
+        const first = samples[0].simulation_s,
+          last = samples.at(-1).simulation_s;
+        const moving = samples.filter((r) =>
+          ["NAVIGATING", "PLANNING", "SETTLING"].includes(r.phase),
+        );
+        const armed = samples.find((r) => r.armed);
+        const start =
+          view.value === "navigation" && moving.length
+            ? Math.max(first, moving[0].simulation_s - 3)
+            : Math.max(first, armed ? armed.simulation_s - 3 : first);
+        const end =
+          view.value === "navigation" && moving.length
+            ? Math.min(last, moving.at(-1).simulation_s + 12)
+            : last;
+        return { min: start, max: Math.max(start + 1, end) };
+      }
+
+      function legendIndex(plot) {
+        const time = eventHighlight?.simulation_s,
+          x = plot.data[0];
+        return Number.isFinite(time) && time >= x[0] && time <= x.at(-1)
+          ? plot.valToIdx(time)
+          : (plot.cursor.idx ?? samples.length - 1);
+      }
+
+      function draw() {
+        if (!samples.length) return;
+        updating = true;
+        pauses = [];
+        let previous = null;
+        for (const row of samples) {
+          if (row.phase === "PAUSED" && previous && previous !== "PAUSED")
+            pauses.push(row.simulation_s);
+          if (row.phase) previous = row.phase;
+        }
+        const x = samples.map((r) => r.simulation_s);
+        let range = zoom ?? bounds();
+        const time = eventHighlight?.simulation_s;
+        if (
+          Number.isFinite(time) &&
+          time >= x[0] &&
+          time <= x.at(-1) &&
+          (time < range.min || time > range.max)
+        ) {
+          const width = range.max - range.min;
+          const min = Math.max(x[0], Math.min(time - width / 2, x.at(-1) - width));
+          range = { min, max: min + width };
+        }
+        for (const { plot, definitions } of plots) {
+          plot.batch(() => {
+            plot.setData([x, ...definitions.map(([key]) => samples.map((r) => r[key] ?? null))]);
+            plot.setScale("x", range);
+          });
+          plot.redraw(false, false);
+          plot.setLegend({ idx: legendIndex(plot) });
+        }
+        updating = false;
+      }
+
+      function follow() {
+        zoom = null;
+        byId("interaction").textContent =
+          "Hover for values · click a legend to toggle · drag to zoom · double-click to follow live.";
+        draw();
+      }
+      byId("reset").addEventListener("click", follow);
+      view.addEventListener("change", () => {
+        userSelected = true;
+        byId("open").href = "/?view=" + view.value;
+        follow();
+      });
+
+      function receive(data) {
+        status.dataset.live = String(data.live);
+        status.textContent =
+          (data.live ? "● Recording" : "Last recording") +
+          (data.simulation_s == null
+            ? " · waiting for samples"
+            : " · " + wallTimestamp(data.samples.at(-1)?.timestamp_unix_s));
+        byId("csv").setAttribute("aria-disabled", String(!data.csv_available));
+        view.options[0].disabled = !data.navigation_available;
+        const previousView = view.value;
+        if (!userSelected) view.value = data.navigation_available ? "navigation" : "full";
+        if (!data.navigation_available && view.value === "navigation") view.value = "full";
+        byId("open").href = "/?view=" + view.value;
+        if (version === data.version && previousView === view.value) return;
+        version = data.version;
+        if (run !== data.run) {
+          zoom = null;
+          if (run !== null) eventHighlight = null;
+          run = data.run;
+        }
+        samples = data.samples;
+        byId("waiting").hidden = !!samples.length;
+        byId("charts").hidden = !samples.length;
+        if (!samples.length) return;
+        if (!plots.length) {
+          makePlot("altitude", [
+            ["simulation_height_m", "Simulator", "#79dfac"],
+            ["estimated_height_m", "PX4 estimate", "#f0be70"],
+            ["commanded_height_m", "Command", "#a6abff", [6, 4]],
+          ]);
+          makePlot("speed", [
+            ["actual_speed_m_s", "Actual", "#79dfac"],
+            ["estimated_speed_m_s", "PX4 estimate", "#f0be70"],
+            ["expected_speed_m_s", "Expected", "#a6abff", [6, 4]],
+            ["selected_speed_m_s", "Ceiling", "#dd96ce", [2, 4]],
+          ]);
+        }
+        draw();
+      }
+
+      new ResizeObserver(() => {
+        updating = true;
+        for (const { plot } of plots) {
+          const width = Math.max(240, plot.root.parentElement.clientWidth);
+          if (plot.width !== width) {
+            plot.batch(() => plot.setSize({ width, height: 224 }));
+            plot.setLegend({ idx: legendIndex(plot) });
+          }
+        }
+        updating = false;
+        if (window.parent !== window)
+          window.parent.postMessage(
+            {
+              type: "flight-profile-height",
+              height: Math.ceil(document.body.getBoundingClientRect().height) + 4,
+            },
+            "*",
+          );
+      }).observe(document.body);
+
+      window.addEventListener("message", (event) => {
+        if (
+          event.source !== window.parent ||
+          !["http://127.0.0.1:8787", "http://localhost:8787"].includes(event.origin) ||
+          event.data?.type !== "flight-profile-event"
+        )
+          return;
+        eventHighlight = Number.isFinite(event.data.simulation_s) ? event.data : null;
+        draw();
+      });
+
+      const events = new EventSource("/api/events");
+      events.addEventListener("profile", (event) => receive(JSON.parse(event.data)));
+      events.onerror = () => {
+        status.dataset.live = "false";
+        status.textContent = "Recorder unavailable · reconnecting";
+      };
+      window.addEventListener("pagehide", () => events.close());
+    </script>
+  </body>
+</html>

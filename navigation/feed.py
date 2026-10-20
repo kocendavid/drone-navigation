@@ -13,9 +13,9 @@ import uuid
 import numpy as np
 from .mapping import RayMap
 from .settings import NavigationSettings
-from .centering import center_geometry
 from .timing import TrajectoryClock
 from .diagnostic_wire import DiagnosticEmitter
+from .process_worker import ProcessService
 
 
 @dataclass
@@ -130,6 +130,9 @@ class MapFeed:
             env=env,
             creationflags=flags,
         )
+        self.geometry = ProcessService(
+            "map_geometry", "navigation.map_geometry:MapGeometry", self.settings
+        )
         self.processor = threading.Thread(target=self._process_maps, daemon=True)
         self.processor.start()
         self.reader = threading.Thread(target=self._read, daemon=True)
@@ -229,29 +232,7 @@ class MapFeed:
         if len(chars) != width * height or set(chars) - set("?.#b"):
             raise ValueError("Invalid map cells")
         geometry_started = time.monotonic()
-        old = self.snapshot
-        confirmed = item.get("confirmed_walls", "0" * (width * height))
-        geometry_key = (chars, confirmed)
-        if old is not None and geometry_key == getattr(self, "geometry_key", None):
-            model, clearance, body_free, safe = (
-                old.model,
-                old.clearance,
-                old.body_free,
-                old.safe,
-            )
-            center_clearance, centerline = old.center_clearance, old.centerline
-        else:
-            model = RayMap(**self.settings.map_options())
-            model.grid = np.array(
-                [{"?": 0, ".": 1, "#": 2, "b": 3}[c] for c in chars], dtype=np.uint8
-            ).reshape(height, width)
-            if len(confirmed) != width * height or set(confirmed) - set("01"):
-                raise ValueError("Invalid wall confirmation mask")
-            model.confirmed_walls = np.array(list(confirmed)).reshape(height, width) == "1"
-            if np.any(model.confirmed_walls & (model.grid != 2)):
-                raise ValueError("Confirmed walls must remain occupied")
-            clearance, body_free, safe = model.geometry()
-            center_clearance, centerline = center_geometry(model, clearance, safe)
+        model, clearance, body_free, safe, center_clearance, centerline = self.geometry.call(item)
         if hasattr(self, "map_diagnostics"):
             self.map_diagnostics.emit(
                 "feed_map",
@@ -312,7 +293,6 @@ class MapFeed:
         with self.lock:
             if not self.stopping:
                 self.snapshot = snap
-                self.geometry_key = geometry_key
                 self.map_condition.notify_all()
 
     def get(self):
@@ -323,6 +303,7 @@ class MapFeed:
 
     def close(self):
         self._fail("Map feed closed")
+        self.geometry.close()
         if self.process.poll() is None:
             self.process.terminate()
             try:

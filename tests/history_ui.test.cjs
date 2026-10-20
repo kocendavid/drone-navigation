@@ -32,6 +32,19 @@ function dashboard() {
         height: 900,
         getContext: () => drawing,
         addEventListener() {},
+        querySelector(selector) {
+          return this.querySelectorAll(selector)[0] || null;
+        },
+        querySelectorAll(selector) {
+          return this.children.flatMap((child) =>
+            typeof child === "object"
+              ? [
+                  ...(selector === "input" && child.type === "checkbox" ? [child] : []),
+                  ...child.querySelectorAll(selector),
+                ]
+              : [],
+          );
+        },
         replaceChildren(...nodes) {
           this.children = [...nodes];
         },
@@ -42,6 +55,7 @@ function dashboard() {
     return elements.get(id);
   }
   const sandbox = {
+    window: { addEventListener() {} },
     document: {
       getElementById: element,
       createElement: () => element("generated-" + elements.size),

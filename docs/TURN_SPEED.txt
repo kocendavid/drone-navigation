@@ -1,0 +1,104 @@
+Turn speed and route smoothing — 20 October 2026
+
+The route should spread direction changes over available known free space.
+The total bend angle alone does not determine the speed it can maintain.
+These results describe the offline reference model, not measured aircraft limits.
+
+Current limits
+
+Configured cruise is 1.2 m/s and vector acceleration is 0.25 m/s². The route
+profile reserves 60% (0.15 m/s²) for lateral acceleration, leaving room for
+tangential speed changes. Its continuous curve bound is:
+
+    speed <= sqrt(0.15 * radius)
+
+Radius (m)         1       2       4       6       9.6
+Speed (m/s)      0.387   0.548   0.775   0.949    1.2
+
+A smooth 90° turn of radius 10 m can keep cruise under this model. A sharp
+15° vertex cannot: the direction changes over very little distance.
+
+Unrounded vertices
+
+The former policy assigned zero speed above 12° between adjacent segments.
+It now combines measured polyline curvature with a 2 cm corner-blend budget.
+For angle theta, an implicit tangent fillet whose radius is R deviates from
+the vertex by R * (sec(theta/2) - 1). Its radius cannot exceed:
+
+    R = 0.02 / (sec(theta/2) - 1)
+
+The effective radius is the smaller of this bound and the sampled geometric
+radius. Under the current model, an isolated unrounded kink can keep 1.2 m/s
+only up to approximately 7.39°. Limits then decrease continuously:
+
+Local kink       5°      10°      12°      15°      30°      45°      90°
+Speed (m/s)     1.20     0.89     0.74     0.59     0.29     0.19     0.085
+
+This is a modeling choice tied to the deviation budget, not evidence that the
+aircraft must slow at 7.39° of total yaw. Curved routes have many small local
+angles. Goal braking, short adjoining segments, tracking and obstacles can
+reduce speed further. Tight unresolved corners retain the conservative
+0.4 m approach zone and near-hover handling.
+
+Yaw and handover
+
+Yaw uses a chord about one second ahead (0.3–3 m), compensating some of the
+bounded yaw reference's lag during steady curves. Facing error starts a smooth
+speed-cap transition at 30° and reaches the configured 0.7 m/s cap at 60°.
+It does not request zero translation speed. Yaw rate and acceleration remain
+bounded by the configured 60°/s and 90°/s².
+
+Abrupt travel-direction handovers still brake when reference or measured speed
+exceeds 0.15 m/s and the onward direction has dot product below 0.7 with the
+current travel direction: approximately 45.57°. This is an existing safety
+guard for a discontinuous handover, not a maximum angle for an entire smooth
+curve. Removing it needs moving-flight evidence and a validated replacement
+that accounts for stopping space and actual velocity.
+
+Route selection and replanning
+
+A* retains its clearance and known-space center preference. The planner
+compares shortcut tolerances of 2%, 8% and 15%, rounds each safely, and excludes
+candidates costing more than 5% above the conservative candidate's integrated
+center/clearance cost. Eligible candidates minimize:
+
+    rest-to-rest estimated seconds
+    + 0.25 * total speed variation / configured acceleration
+    + (weighted clearance cost in metres - route length) / cruise
+
+The travel estimate includes forward acceleration and backward braking bounds;
+it excludes live tracking and sensor interventions. This searches a bounded
+candidate family derived from the A* route, not all possible continuous routes.
+Frontier destination ordering still uses planned geometric length.
+
+Rounding requests a radius appropriate to cruise and the acceleration budget,
+limited to 40% of each adjoining segment to avoid overlapping neighboring
+curves. Candidate curves must pass every safe-mask segment check. A new tail
+may use a cubic blend starting tangent to the committed prefix and ending
+tangent to its retained tail. The prefix itself stays exact for asynchronous
+rebasing. An unsafe or worse-scoring blend falls back to the original tail.
+Same-goal replanning requires a 5% combined-score improvement to avoid churn.
+
+Intermediate samples describe route geometry. They no longer discard the
+unused distance of a control interval. An offline dense straight-line case
+with 8 cm samples and a 0.1 s step previously reduced 1.2 m/s to 0.8 m/s;
+the corrected follower keeps 1.2 m/s. Goal and tight-corner clamps remain.
+Current-map motion and stopping-envelope audits still run on actual candidates.
+
+Reproduction and flight evaluation
+
+    python tools/analyze_turn_speed.py
+
+Writes results/turn_speed/turn_speed.csv, summary.json and turn_speed.png using
+the active navigation settings. The sweep compares sharp vertices and rounded
+bends across angles and tangent-cut distances. It sends no flight commands.
+tests/test_turn_planning.py covers continuous limits, arc sampling, control
+step sizes, route scoring, blocked blends, exact prefix rebasing and obstacles.
+The normal full suite also checks tracking lag and vector acceleration.
+
+The navigator must reload before these source changes affect a running flight.
+For moving evaluation, compare identical goals and map snapshots at the same
+cruise. Record speed variation, low-speed duration, travel time, clearance,
+tracking error, yaw error and each dominant speed limiter. The speed-decision
+record now includes the upcoming local turn angle and effective radius.
+Physical turn capability remains unverified until that PX4/Isaac evaluation.

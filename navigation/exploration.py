@@ -142,7 +142,15 @@ def wall_occluded_cells(grid, start, cells):
 
 
 def choose_frontier(
-    snapshot, start_xy, visited=(), trail=(), *, catalog=None, active_id=None, current_goal=None
+    snapshot,
+    start_xy,
+    visited=(),
+    trail=(),
+    *,
+    catalog=None,
+    active_id=None,
+    current_goal=None,
+    settings=None,
 ):
     """Nearest reachable frontier by actual center-guided route length.
 
@@ -239,7 +247,7 @@ def choose_frontier(
                 continue
             useful += 1
             try:
-                path = plan(snapshot, start_xy, goal)
+                path = plan(snapshot, start_xy, goal, settings=settings)
             except ValueError:
                 continue
             length = sum(math.dist(a, b) for a, b in zip(path, path[1:]))

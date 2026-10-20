@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 import numpy as np
+from .process_worker import ProcessService
 
 
 def utc_now():
@@ -39,6 +40,10 @@ class RunHistory:
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.touch(exist_ok=False)
+            self.service = ProcessService(
+                "history_writer", "navigation.report_jobs:HistoryProcessor", self.path, self.run_id
+            )
+            self.remote_report = None
             self.thread = threading.Thread(target=self._writer, daemon=True)
             self.thread.start()
 
@@ -57,10 +62,12 @@ class RunHistory:
                     return
                 if item[0] == "barrier":
                     item[1].set()
-                elif item[0] == "state":
-                    self._observe(*item[1:])
                 else:
-                    self._event(*item[1:])
+                    report, offsets = self.service.call(item)
+                    with self.lock:
+                        self.remote_report = report
+                        self.frame_offsets = offsets
+                        self.error = report["error"]
             except Exception as exc:
                 with self.lock:
                     self.error = str(exc)
@@ -255,6 +262,8 @@ class RunHistory:
 
     def report(self):
         with self.lock:
+            if getattr(self, "remote_report", None) is not None:
+                return dict(self.remote_report, error=self.error, dropped_records=self.dropped)
             return dict(
                 run_id=self.run_id,
                 log_file=str(self.path) if self.path else None,
@@ -303,6 +312,8 @@ class RunHistory:
             self.closed = True
             if self.thread:
                 self.queue.put(None, timeout=3)
+                self.thread.join(timeout=3)
+                self.service.close()
                 self.thread.join(timeout=3)
 
 

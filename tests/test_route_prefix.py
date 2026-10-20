@@ -95,7 +95,7 @@ class RoutePrefixTests(unittest.TestCase):
             calls.append(np.array(start))
             return ExplorationChoice([-2, 2], [list(start), [-2, 2]], 3, 3, 20)
 
-        with patch("ros2_navigate.choose_frontier", side_effect=choose):
+        with patch("navigation.planning_jobs.choose_frontier", side_effect=choose):
             node.launch_reconsideration(snap)
             node.reconsider_thread.join(2)
         self.assertFalse(node.reconsider_thread.is_alive())

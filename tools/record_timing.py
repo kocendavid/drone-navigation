@@ -17,6 +17,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from navigation.diagnostic_wire import PORT
 from navigation.diagnostics import analyze, incident_window
+from navigation.flight_profile import FlightProfile
 
 PROJECT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +40,9 @@ def atomic_json(path, value, *, busy_ok=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration", type=float, help="Optional finite read-only capture")
+    parser.add_argument(
+        "--floor-z", type=float, help="Mapping floor for one-second height profiles"
+    )
     args = parser.parse_args()
     receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     receiver.bind(("127.0.0.1", PORT))  # One recorder, no port sharing.
@@ -47,6 +51,17 @@ def main():
         PROJECT / "logs" / ("timing_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f"))
     )
     folder.mkdir()
+    clock_anchor = dict(unix_s=time.time(), monotonic_s=time.perf_counter())
+    atomic_json(folder / "wall_clock.json", clock_anchor)
+    floor_z = args.floor_z
+    if floor_z is None:
+        floor_z = json.loads((PROJECT / "config" / "navigation_settings.json").read_text())[
+            "floor_z_m"
+        ]
+    profile = FlightProfile(
+        folder / "flight_profiles", floor_z, clock_anchor["unix_s"] - clock_anchor["monotonic_s"]
+    )
+    profile_error = None
     log = (folder / "events.jsonl").open("w", encoding="utf-8", buffering=65536)
     status_path = PROJECT / "logs" / "timing_diagnostics.json"
     native_session = uuid.uuid4().hex
@@ -72,7 +87,10 @@ def main():
             try:
                 item = json.loads(line)
                 item.update(
-                    source="px4_native", session=native_session, received_wall_s=time.perf_counter()
+                    source="px4_native",
+                    session=native_session,
+                    received_wall_s=time.perf_counter(),
+                    received_unix_s=time.time(),
                 )
                 pending.put_nowait(item)
             except (ValueError, Full):
@@ -99,6 +117,7 @@ def main():
                     item = json.loads(payload)
                     if isinstance(item.get("kind"), str) and item.get("session"):
                         item["received_wall_s"] = time.perf_counter()
+                        item["received_unix_s"] = time.time()
                         incoming.append(item)
             except socket.timeout:
                 pass
@@ -120,7 +139,18 @@ def main():
                     sequence[key] = max(number, sequence.get(key, 0))
                 recent.append(item)
                 log.write(json.dumps(item, allow_nan=False, separators=(",", ":")) + "\n")
-                if item["kind"] == "stop":
+                if profile_error is None:
+                    try:
+                        profile.observe(item)
+                    except Exception as error:
+                        # Profile/export failures must not interrupt raw recording.
+                        profile_error = str(error)
+                        print(
+                            "Flight profile unavailable: " + profile_error,
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                if item["kind"] in ("stop", "deadline_miss"):
                     incidents.append(dict(deadline=now + 2, event=item))
             while recent and now - recent[0]["received_wall_s"] > 20:
                 recent.popleft()
@@ -167,6 +197,11 @@ def main():
                     dropped_records=dropped[0],
                     sequence_gaps=lost,
                     native_probe_running=process.poll() is None,
+                    flight_profile=dict(
+                        csv=str(profile.files[-1]) if profile.files else None,
+                        samples=profile.samples,
+                        error=profile_error,
+                    ),
                     latest=latest,
                     last_incident=last_incident,
                 )
@@ -183,6 +218,7 @@ def main():
         except subprocess.TimeoutExpired:
             process.terminate()
         log.close()
+        profile.finish()
         status.update(recording=False, updated_wall_s=time.perf_counter())
         atomic_json(status_path, status, busy_ok=True)
 

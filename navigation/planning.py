@@ -197,7 +197,50 @@ def segment_cost(a, b, traversal_cost):
     return float((values[:-1] + values[1:]).sum() * math.dist(a, b) / (2 * (count - 1)))
 
 
-def plan(snapshot, start_xy, goal_xy):
+def route_cost(snapshot, path, cost):
+    # Integrate physical metres. Quantizing each dense curve segment to cell
+    # centers makes its cost depend on sample spacing (and often become zero).
+    total = 0.0
+    model = snapshot.model
+    for a, b in zip(path, path[1:]):
+        distance = math.dist(a, b)
+        count = max(2, math.ceil(distance / (model.resolution * 0.5)) + 1)
+        samples = np.linspace(a, b, count)
+        cells = np.floor((samples - model.origin) / model.resolution).astype(int)
+        values = cost[cells[:, 1], cells[:, 0]]
+        total += float((values[:-1] + values[1:]).sum()) * distance / (2 * (count - 1))
+    return total
+
+
+def curve_acceptance(snapshot, cost, tolerance=1.05):
+    def acceptable(candidate, original):
+        cells = [snapshot.model.cell(p) for p in candidate]
+        return all(segment_safe(snapshot.safe, a, b) for a, b in zip(cells, cells[1:])) and (
+            route_cost(snapshot, candidate, cost)
+            <= route_cost(snapshot, original, cost) * tolerance + 1e-9
+        )
+
+    return acceptable
+
+
+def motion_score(snapshot, path, cost, settings):
+    """Seconds plus speed-change and soft clearance costs, all in seconds."""
+    from .curves import flight_metrics
+
+    metrics = flight_metrics(path, settings.acceleration_m_s2, settings.cruise_m_s)
+    clearance = max(0.0, route_cost(snapshot, path, cost) - metrics["length_m"])
+    return (
+        metrics["seconds"]
+        + 0.25 * metrics["speed_variation_m_s"] / settings.acceleration_m_s2
+        + clearance / settings.cruise_m_s
+    )
+
+
+def plan(snapshot, start_xy, goal_xy, settings=None):
+    from .settings import load_settings
+    from .curves import rounded_route, LATERAL_ACCELERATION_SHARE
+
+    settings = settings or load_settings()
     model = snapshot.model
     start, goal = model.cell(start_xy), model.cell(goal_xy)
     if not model.inside(start) or not model.inside(goal):
@@ -211,43 +254,41 @@ def plan(snapshot, start_xy, goal_xy):
     prefix = [0.0]
     for a, b in zip(route, route[1:]):
         prefix.append(prefix[-1] + path_cost([a, b], cost))
-    # Shortcuts must preserve inflated obstacles and unknown-space exclusions.
-    smooth = [route[0]]
-    i = 0
-    while i < len(route) - 1:
-        j = len(route) - 1
-        while j > i + 1 and not (
-            segment_safe(snapshot.safe, route[i], route[j])
-            and segment_cost(route[i], route[j], cost) <= (prefix[j] - prefix[i]) * 1.02 + 1e-9
-        ):
-            j -= 1
-        smooth.append(route[j])
-        i = j
-    cells = escape[:-1] + smooth
-    world = [model.world(cell).tolist() for cell in cells]
-    world[0] = list(map(float, start_xy))
-    if len(world) == 1:
-        world.append(list(map(float, goal_xy)))
-    else:
-        world[-1] = list(map(float, goal_xy))
-    if not all(
-        segment_safe(snapshot.body_free, model.cell(a), model.cell(b))
-        for a, b in zip(world, world[1:])
-    ):
-        raise ValueError("Route shortcut crosses insufficiently observed space")
-    from .curves import rounded_route
-
-    def acceptable(candidate, original):
-        candidate_cells = [model.cell(p) for p in candidate]
-        # Rounding cannot cut into the inflation margin or unknown cells. A
-        # near-wall escape remains straight until it reaches the safe mask.
+    # Compare a small, bounded family of shortcuts through the A* corridor.
+    # A limited soft-center tradeoff can remove slow bends; hard safety never relaxes.
+    candidates = []
+    radius = settings.cruise_m_s**2 / (LATERAL_ACCELERATION_SHARE * settings.acceleration_m_s2)
+    for tolerance in (1.02, 1.08, 1.15):
+        smooth = [route[0]]
+        i = 0
+        while i < len(route) - 1:
+            j = len(route) - 1
+            while j > i + 1 and not (
+                segment_safe(snapshot.safe, route[i], route[j])
+                and segment_cost(route[i], route[j], cost)
+                <= (prefix[j] - prefix[i]) * tolerance + 1e-9
+            ):
+                j -= 1
+            smooth.append(route[j])
+            i = j
+        cells = escape[:-1] + smooth
+        world = [model.world(cell).tolist() for cell in cells]
+        world[0] = list(map(float, start_xy))
+        if len(world) == 1:
+            world.append(list(map(float, goal_xy)))
+        else:
+            world[-1] = list(map(float, goal_xy))
         if not all(
-            segment_safe(snapshot.safe, a, b) for a, b in zip(candidate_cells, candidate_cells[1:])
+            segment_safe(snapshot.body_free, model.cell(a), model.cell(b))
+            for a, b in zip(world, world[1:])
         ):
-            return False
-        old = [model.cell(p) for p in original]
-        before = sum(segment_cost(a, b, cost) for a, b in zip(old, old[1:]))
-        after = sum(segment_cost(a, b, cost) for a, b in zip(candidate_cells, candidate_cells[1:]))
-        return after <= before * 1.02 + 1e-9
-
-    return rounded_route(world, acceptable)
+            raise ValueError("Route shortcut crosses insufficiently observed space")
+        candidate = rounded_route(
+            world, curve_acceptance(snapshot, cost, tolerance), minimum_radius=radius
+        )
+        candidates.append(candidate)
+    baseline_cost = route_cost(snapshot, candidates[0], cost)
+    bounded = [
+        p for p in candidates if route_cost(snapshot, p, cost) <= baseline_cost * 1.05 + 1e-9
+    ]
+    return min(bounded, key=lambda p: motion_score(snapshot, p, cost, settings))

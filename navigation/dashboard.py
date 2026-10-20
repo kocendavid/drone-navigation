@@ -9,11 +9,9 @@ from queue import Full
 import secrets
 import threading
 import time
-import numpy as np
-from .planning import plan
 from .history import RunHistory, CommandReceipts
-from .centering import routing_geometry
 from .diagnostics import read_status
+from .process_worker import ProcessService
 
 
 def validate_destination(point):
@@ -29,6 +27,7 @@ def validate_destination(point):
 
 class Dashboard:
     def __init__(self, feed, commands=None, port=8787, history=None):
+        self.presentation = ProcessService("dashboard", "navigation.report_jobs:PresentationJobs")
         self.feed = feed
         self.commands = commands
         self.reset = None
@@ -55,7 +54,7 @@ class Dashboard:
 
             def respond(self, status, payload, kind="application/json"):
                 body = (
-                    json.dumps(payload, allow_nan=False).encode()
+                    owner.presentation.call(("json", payload))
                     if kind == "application/json"
                     else payload.encode()
                 )
@@ -333,7 +332,7 @@ class Dashboard:
         snap, failure = self.feed.get()
         if failure or snap is None or not snap.fresh(time.monotonic()):
             raise ValueError(failure or "Waiting for fresh map")
-        return point, plan(snap, snap.pose[:2], point)
+        return point, self.presentation.call(("plan", (snap, point)))
 
     def plan_home(self):
         """Read-only demonstration of the same planner used by Return to start."""
@@ -395,27 +394,10 @@ class Dashboard:
             ),
         )
         if snap is not None:
-            _, centerline, _ = routing_geometry(snap)
+            result.update(self.presentation.call(("map", snap)))
             result.update(
                 map_fresh=not failure and snap.fresh(now),
                 map_reason=failure or snap.reason,
-                size=snap.model.grid.shape[1],
-                width=snap.model.grid.shape[1],
-                height=snap.model.grid.shape[0],
-                origin=snap.model.origin.tolist(),
-                resolution=snap.model.resolution,
-                grid="".join(np.array(["?", ".", "#", "b"])[snap.model.grid.ravel()].tolist()),
-                confirmed_walls="".join(
-                    np.where(snap.model.confirmed_walls.ravel(), "1", "0").tolist()
-                ),
-                wall_policy=snap.model.wall_policy(),
-                safe="".join(np.where(snap.safe.ravel(), "1", "0").tolist()),
-                centerline="".join(np.where(centerline.ravel(), "1", "0").tolist()),
-                planning_policy="prefer_known_space_centers_and_clearance",
-                pose=snap.pose if snap.valid else None,
-                hit_endpoints_xy=np.round(snap.hits, 3).tolist() if snap.valid else [],
-                scans=snap.scans,
-                observed_cells=int(((snap.model.grid == 1) | (snap.model.grid == 2)).sum()),
             )
         return result
 
@@ -424,3 +406,4 @@ class Dashboard:
         self.server.server_close()
         self.thread.join(timeout=2)
         self.history.close()
+        self.presentation.close()
